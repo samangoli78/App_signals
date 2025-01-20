@@ -1,0 +1,322 @@
+import os
+from CARTO_Tool import Carto
+import numpy as np
+import tkinter as tk
+from tkinter import ttk
+from tkinter import filedialog
+import pandas as pd
+
+
+class TreeView_Edit(ttk.Treeview):
+
+    
+
+    def __init__(self,master,**kwargs):
+        super().__init__(master,**kwargs)
+        super().bind("<Button-3>",self.pop)
+        super().bind("<Button-1>",self.on_select)
+        self.params={}
+        self.params["Enter_func"]=lambda x:print(x)
+        self.master=master
+
+    def pop(self,event):
+        menu=tk.Menu(self.master,tearoff=False)
+        menu.add_command( label="Change",command=lambda event=event:self.refill(event))
+        menu.add_command(label="Save",command=self.save)
+        menu.add_separator()
+        menu.add_command(label="Exit",command=menu.destroy)
+        menu.tk_popup(event.x_root,event.y_root)
+      
+
+    def on_enter(self,event:tk.Event,col:str,ID:str,func):
+
+        # get the data inside the entry
+        
+        new_text=event.widget.get()
+        
+        # using ID to access the current value in the selected row
+        
+        selected_values=self.item(ID).get("values")
+        
+        # using col to access the desired cell in the selected row
+        
+        selected_values[col]=new_text
+        
+        # you can assign new value to the table with table.item method identifying the ID and value, optionally if you want to change the tag you need to specify "changed color" place holder first.
+        
+        self.item(ID,values=selected_values,tags='changed_tag')
+        
+        # then you can assign the desired color to the " changed color" place holder that you just assigned.
+        
+        self.tag_configure("changed_tag",background="#A5A5A5")
+        
+        # dont forget to destroy the entry widget.
+        
+        event.widget.destroy()
+        func([self.ID_to_row(ID),col,selected_values[col]])
+    
+    def add_data(self,data,row,col):
+        ID=self.get_children()[row]
+        data_T=self.item(ID).get("values")
+        data_T[col]=data
+        self.item(ID,values=data_T,tags="new")
+        
+
+
+
+    def bind(self,identifier:str,func):
+        
+        # change the binding function of "select" event to a custom function, designed for better customizing the module for external usrsers
+        if identifier=="<Button-1>":
+            super().unbind("<Button-1>")
+            super().bind(identifier,lambda event:func(self.on_select(event)))
+        elif identifier=="<Return>":
+            self.params["Enter_func"]=func
+    def on_select(self,event):
+        
+        # on calling "select" the data of the selected cell will be generated and returned
+        
+        out=self.find(event)
+        
+        return out
+        
+    def ID_to_row(self,ID):
+        data=self.item(ID).get("values")
+        row=data[0]
+        return row
+
+    def find(self,event):
+        
+        # to see if it is in cell or heading or text
+        
+        selected_region=self.identify_region(event.x,event.y)
+        
+        # finding column in string = "#$$"
+        
+        selected_column=self.identify_column(event.x)
+        
+        # finding the ID where the mouse is on_row
+        
+        selected_ID=self.identify_row(event.y)
+        
+        # to check if they are all valid
+        
+        if selected_column and selected_ID and selected_region=="cell":
+        
+            #geting the value of a row based on its ID
+        
+            data=self.item(selected_ID).get("values")
+        
+            #except the first char "#" others identify the column and it starts from 1
+        
+            col=int(selected_column[1:])-1
+        
+            #the first element indicates the index as we identified a certain column for indexes at the begining on the input table
+        
+            row=data[0]
+        
+            return row,col,data 
+        
+        else:
+        
+            return None
+
+
+    def refill(self,event=None,row=None):
+        if event is not None:
+            selected_ID=self.identify_row(event.y)
+            print(selected_ID)
+            out=self.find(event)
+        elif row is not None:
+            try:
+                
+                selected_ID=self.get_children()[row]
+                out=[row,self.col,self.item(selected_ID).get("values")]
+            except Exception as e:
+                print(e)
+                return
+        else:
+            return
+        
+
+        
+
+        if out is not None:
+            # select
+      
+            self.selection_set(selected_ID)
+      
+            # focus
+      
+            self.focus(selected_ID)
+            # accessing only column and data outputs of the self.find() method
+
+            col,data=out[1:]
+            self.col=col
+            # getting the coordinate of the cell in the frame 
+
+            coord=self.bbox(selected_ID,col)
+
+            entry_edit=tk.Entry(self.master)
+
+            # putting an entry widget right on the coordinate with the same size
+
+            entry_edit.place(x=coord[0],y=coord[1],width=coord[2],height=coord[3])
+
+            # selecting all in entry widget
+
+            entry_edit.select_range(0,tk.END)
+
+            # insert the same cell data to the entry widget
+
+            entry_edit.insert(0,data[col])
+
+            # focus on the entry widget 
+
+            entry_edit.focus()
+
+            # bind <focus out> to be able to destroy entry widget while the mouse is not on the entry anymore
+
+            entry_edit.bind("<FocusOut>",lambda event: event.widget.destroy())
+
+            # bind enter, to be able to save entry data to the selected cell and then destroy the entry widget
+
+            entry_edit.bind("<Return>",lambda event,selected_column=col,selected_ID=selected_ID,
+                            :self.on_enter(event,selected_column,selected_ID,func=self.params["Enter_func"]))
+            
+    def go_to(self,row):
+      
+        # when you have the row, you can easilly find the ID by geting chidren method and choosing the right index
+      
+        ID=self.get_children()[row]
+      
+        # see
+      
+        self.see(ID)
+      
+        # select
+      
+        self.selection_set(ID)
+      
+        # focus
+      
+        self.focus(ID)
+
+    def save(self):
+   
+        file=filedialog.asksaveasfilename(confirmoverwrite=True,filetypes=(
+        ("Text files", "*.txt"),
+        ("excel", ("*.csv", "*.xml")),
+        ("All Files", "*.*")))
+
+   
+        row_ids=self.get_children()
+        out=[self["columns"]]
+   
+        for id in row_ids:
+            out.append(self.item(id).get("values"))
+        
+
+        if file is not None:
+  
+            format=file.split("/")[-1].split(".")[-1]
+  
+            if format=="txt":
+                with open(file,"w") as file:
+                    file.writelines([";".join([str(item) for item in line]+["\n"]) for line in out])
+            elif format=="csv":
+                pd.DataFrame(out[1:],columns=out[0]).to_csv(file,index=False)
+            else:
+                pd.DataFrame(out[1:],columns=out[0]).to_csv(file,index=False)
+                print("format not indicated and the table was saved as csv file")
+            
+
+            
+    
+
+
+
+
+
+class Table:
+    def __init__(self,master,table:pd.DataFrame):
+   
+        # gettimg a root for the table it could be a tk.Tk or tk.Frame
+   
+        self.master=master
+        self.master: tk.Tk
+
+   
+        # make a frame for the treeviewedit object
+   
+        self.tree_frame = tk.Frame(self.master, width=500, height=200)
+   
+        # making the desired scroll bars vertically and horizontally
+   
+        self.h_scroll = ttk.Scrollbar(self.master, orient="horizontal")
+        self.v_scroll = ttk.Scrollbar(self.master, orient="vertical")
+        
+        # listing the columns of the input table
+        
+        cols=table.columns.tolist()
+        
+        # adding an index column
+        
+        cols.insert(0,"index")
+        self.table=TreeView_Edit(self.tree_frame,columns=cols,selectmode=tk.BROWSE,
+                                show="headings",xscrollcommand=self.h_scroll.set,
+                                yscrollcommand=self.v_scroll.set)
+        
+        # binding scroll bars with their commands
+        
+        self.h_scroll.config(command=self.table.xview)
+        self.v_scroll.config(command=self.table.yview)
+        
+        # assign heading to the columns
+        
+        [self.table.heading(val,text=val) for i,val in enumerate(cols)]
+        
+        # insert values of the table in addition to the first column that involve indexes
+        
+        [self.table.insert(parent="",index=tk.END,values=np.insert(value,0,i).tolist()) for i,value in enumerate(table.values)]
+        
+        # configuring columns format 
+        
+        [self.table.column(column=val,stretch=tk.YES,minwidth=30,width=60,anchor="center") for i,val in enumerate(cols)]
+        
+        # ?
+        
+        self.master.grid_rowconfigure(1, weight=1)
+        self.master.grid_columnconfigure(0, weight=1)
+        
+        # packing table in tree frame
+        
+        self.table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # placing tree frame
+        
+        self.tree_frame.grid(row=1,column=0,sticky=tk.NSEW)
+        self.tree_frame.grid_propagate(False)
+        
+        #placing scroll bars
+        
+        self.v_scroll.grid(row=1,column=1,sticky=tk.NS)
+        self.h_scroll.grid(row=2,column=0,sticky=tk.EW )
+        #tk.Button(self.master,command=self.table.save).grid(column=0,row=3)
+        
+   
+
+
+
+
+if __name__=="__main__":
+    carto=Carto(r"F:/New_Case_3Extra")
+    #print(carto.path)
+    table:pd.DataFrame = None
+    table=carto.car_extract()
+    #print(table)
+    root=tk.Tk()
+    table=Table(root,table)
+    #print(table.h_scroll)
+    table.table.go_to(10)
+    root.mainloop()
