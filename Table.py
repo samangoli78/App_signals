@@ -303,20 +303,19 @@ class Table:
         self.v_scroll.grid(row=1,column=1,sticky=tk.NS)
         self.h_scroll.grid(row=2,column=0,sticky=tk.EW )
         #tk.Button(self.master,command=self.table.save).grid(column=0,row=3)
-        
-   
 
 
 
 
 if __name__=="__main__":
-    carto=Carto(r"F:/New_Case_3Extra")
+    #carto=Carto(r"F:/New_Case_3Extra")
     #print(carto.path)
     table:pd.DataFrame = None
-    table=carto.car_extract()
+    #table=carto.car_extract()
     #print(table)
     root=tk.Tk()
+    table=pd.DataFrame(np.zeros((4,4)),columns=[i for i in range(4)])
     table=Table(root,table)
     #print(table.h_scroll)
-    table.table.go_to(10)
+    table.table.go_to(2)
     root.mainloop()
