@@ -25,11 +25,6 @@ from Ax import ax
 
 
 
-class Params:
-    def __init__(self) -> None:
-        pass
-
-
 class App(tk.Tk):
     apps=[]
     def __init__(self, name="Saman", carto:Carto=None):
@@ -37,13 +32,14 @@ class App(tk.Tk):
         self.is_running=True
         self.carto = carto
         self.cont = self.carto.cont
-        self.params=Params()
-        self.params.name=name
         self.triple_active=False
+        self.name=name
+        self.VT_active=False
         self.check_boxes={}
         self.i, self.j = 0, 0
         self.Table=[]
-        self.i_j_to_index()
+        #self.i_j_to_index(labels="hide")
+        self.i_j_to_index(labels="unhide")
         self.creating_delta()
         # going to the first item of the list, which is arbitrary and could be any other numbers, 
         # and accesss the first element that is a dataframe containing information of the points
@@ -56,7 +52,7 @@ class App(tk.Tk):
         #preallocation of the delta list
         self.delta=[0]*len(self.to_i_j)
         
-    def i_j_to_index(self):
+    def i_j_to_index(self,labels="unhide"):
         self.to_index=[]
         self.to_i_j=[]
         self.labels_memory=[]
@@ -71,7 +67,8 @@ class App(tk.Tk):
             for j,dat in enumerate(section[0].values):
                 self.labels_memory[i].append(carto.cont[i][0].loc[j,"label_color"])
                 #hiding the labels
-                carto.cont[i][0].loc[j,"label_color"]=""
+                if labels=="hide":
+                    carto.cont[i][0].loc[j,"label_color"]=""
                 # i,j to index
                 self.to_index[i].append(ind)
                 #indexs to i,j
@@ -90,7 +87,7 @@ class App(tk.Tk):
         self.start_x_y = []
         self.direction=1   
         self.geometry("600x600")
-        self.title(f"My {self.params.name} APP")
+        self.title(f"My {self.name} APP")
 
         self.frame=tk.Frame(self,padx=5,pady=10,background="grey")
         self.frame.pack(fill="x",expand=False)
@@ -105,8 +102,10 @@ class App(tk.Tk):
             self.check_boxes[key]=tk.IntVar()
             check_box=tk.Checkbutton(self.frame,variable=self.check_boxes[key],command=self.checker,text=key,font=("timesnewroman",10))
             check_box.pack(side=tk.LEFT,fill="x", expand=False)
-        self.button=tk.Button(self.frame,text="is triple extra",command=self.triple_protocol)
-        self.button.pack(side=tk.LEFT,padx=10)
+        self.button_trip=tk.Button(self.frame,text="Switch to Triple Extra Protocol",command=self.triple_protocol)
+        self.button_trip.pack(side=tk.LEFT,padx=10)
+        self.button_VT=tk.Button(self.frame,text="Switch to VT Protocol",command=self.VT_protocol)
+        self.button_VT.pack(side=tk.LEFT,padx=10)
         self.button_screen=tk.Button(self.frame,text="screen shot",command=lambda name=None:self.capture_window(name))
         self.button_screen.pack(side=tk.LEFT,padx=10)
         self.panned_window=ttk.PanedWindow(self,orient="vertical")
@@ -115,8 +114,23 @@ class App(tk.Tk):
         self.panned_window.add(self.frame3,weight=1)
         #self.frame3.pack(expand=True,fill="both")
         self.table=Table(self.frame3,self.Table)
+        self.table.table.set_default([[1,"CAFAE","Fractionated","POS","NEG"]])
+
+        self.frame1=tk.Frame(self,pady=5,background="white")
+        self.panned_window.add(self.frame1,weight=2)
         self.set_figure()
+        self.ccs={}
+        for r,i in enumerate(self.axes.keys()):
+            self.cc=tk.Canvas(self.frame1,width=110,height=130,bg="white",highlightbackground="white")
+            self.cc.grid(column=1,row=r,sticky="")
+            self.ccs[i]=self.cc
+
+        self.frame1.grid_rowconfigure((0,1), weight=1)
+        self.frame1.grid_columnconfigure(0, weight=6)
+        self.frame1.grid_columnconfigure(1, weight=1)
         self.main()
+        self.plot()
+        
 
     def capture_window(self,name=None):
             root=self
@@ -133,35 +147,37 @@ class App(tk.Tk):
 
         self.triple_active=not(self.triple_active)
         if self.triple_active:
-            self.button.config(text="not triple extra")
+            self.button_trip.config(text="Turn off Triple Extra Protocol")
         else:
-            self.button.config(text="is triple extra")
+            self.button_trip.config(text="Switch to Triple Extra Protocol")
+        self.update_plot()
+    def VT_protocol(self,event=None):
+
+        self.VT_active=not(self.VT_active)
+        if self.VT_active:
+            self.button_VT.config(text="Turn off VT Protocol")
+        else:
+            self.button_VT.config(text="Switch to VT Protocol")
         self.update_plot()
         
-    def set_figure(self,x=2,y=1):
+    def set_figure(self,x=2,y=1,mod=False):
         
         self.fig, self.axes = plt.subplots(x,y)
         plt.subplots_adjust(left=0.05, right=0.98, top=0.9, bottom=0.05)
         self.axes={m:ax(self.axes[i],m,self.fig) for i,m in enumerate(["top","bot"])}
+        print(np.shape(self.axes))
         self.fig.clf()
         self.axes["top"]=ax(self.fig.add_subplot(2,1,1),"top",self.fig)
         self.axes["bot"]=ax(self.fig.add_subplot(2,1,2),"bot",self.fig)
         [x.update(xlim=[0,2.5],ylim=[-1,1]) for x in self.axes.values()]
-        self.frame1=tk.Frame(self,pady=5,background="white")
-        self.panned_window.add(self.frame1,weight=2)
+        if mod:
+            #clear frame
+            for widget in self.frame1.winfo_children():
+                widget.destroy()
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame1)
         self.canvas.get_tk_widget().grid(column=0,row=0,rowspan=2,sticky=tk.NSEW)
 
-        self.ccs={}
-        for r,i in enumerate(self.axes.keys()):
-            self.cc=tk.Canvas(self.frame1,width=110,height=130,bg="white",highlightbackground="white")
-            self.cc.grid(column=1,row=r,sticky="")
-            self.ccs[i]=self.cc
-
-        self.frame1.grid_rowconfigure((0,1), weight=1)
-        self.frame1.grid_columnconfigure(0, weight=6)
-        self.frame1.grid_columnconfigure(1, weight=1)
-        self.plot()
+        
 
     def main(self):
 
@@ -185,6 +201,7 @@ class App(tk.Tk):
         self.canvas.mpl_connect("button_release_event", self.on_right_release)
         self.table.table.bind("<Button-1>",self.select)
         self.table.table.bind("<Return>",self.on_enter)
+        #self.table.table.bind("<Double-Button-1>",self.select)
         
         self.canvas.mpl_connect("scroll_event", self.on_scroll)
         super().protocol("WM_DELETE_WINDOW", self.quit)
@@ -476,15 +493,14 @@ class App(tk.Tk):
     
     def select(self,event):
         i,j=self.to_i_j[event[0]]
+        print("selected row with select binding",event[0])
         self.i=i
         self.j=j
     
         self.update_plot()
     def on_enter(self,event):
-
-        
         row,col,val=event
-        print(event)
+        print("row,col,value when enter is pushed",event)
         self.i,self.j=self.to_i_j[row]
         self.update_plot()
         if col == 1:
@@ -497,12 +513,13 @@ class App(tk.Tk):
             traceback.print_exc()
             i,j=0,0
         self.table.table.go_to(self.to_index[i][j])
-        self.table.table.refill(row=self.to_index[i][j])
         self.i=i
         self.j=j
     
         self.update_plot()
 
+        self.table.table.refill(row=self.to_index[i][j])
+       
     def update_plot(self):
         for i in self.axes.values():
             i.ax.clear()
@@ -652,7 +669,8 @@ class App(tk.Tk):
         #y__=minmax_scale(y__, feature_range=(0, 1), axis=0, copy=True)
         y_total=np.convolve(y__,np.hanning(5))/np.sum(np.hanning(5))
         for key,state in self.check_boxes.items():
-            if (state and key.lower() == "energy") :
+            print(key,state)
+            if (state.get() and key.lower() == "energy") :
                 #first is freqs second is time
                 
                 if legends is None:

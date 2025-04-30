@@ -13,27 +13,68 @@ class TreeView_Edit(ttk.Treeview):
 
     def __init__(self,master,**kwargs):
         super().__init__(master,**kwargs)
+        self.params={}
+        self.cmds={}
+        self.default=None
+        master:tk.Tk
+        self.params["Enter_func"]=lambda x:print(x)
+        self.params["select_func"]=lambda x:print(x)
+        self.params["refill_func"]=lambda x:print(x)
+        def_func=lambda event:print(event)
+        for f in ["Focus_out_func","Focus_in_func","Enter_func","right_click_func","left_click_func"]:
+            if f not in self.params.keys():
+                self.params.update({f:def_func})
         super().bind("<Button-3>",self.pop)
         super().bind("<Button-1>",self.on_select)
-        self.params={}
-        self.params["Enter_func"]=lambda x:print(x)
-        self.master=master
+        super().bind("<FocusOut>",self.params["Focus_out_func"])
+        super().bind("<Double-Button-1>",self.double_click)
+        super().bind("<FocusIn>",self.params["Focus_in_func"])
+        self.temp=None
+        def cmd(event):
+            if self.temp is None:
+                return
+            txt=f"{event},child:,{self.get_children()},focus_displayof:{self.focus_displayof()},focus_force:{self.focus_force()}"
+            txt+=f"identify_row:{self.identify_row(event.y)},identify_column:{self.identify_column(event.x)},identify_region:{self.identify_region(event.x,event.y)},identify_element:{self.identify_element(event.x,event.y)}"
+            try:
+                self.lab.configure(text=txt)
+            except:
+                self.lab=tk.Label(self.temp,text=txt,wraplength=self.temp.winfo_width())
+                self.lab.pack()
+        self.cmds["motion"]=cmd
 
+        super().bind("<Motion>",self.cmds["motion"])
+        #super().bind("<Double-Button-1>",self.double_click)
+        self.master=master
+         
+    def double_click(self,event):
+        self.params["refill_func"]([self.get_children().index(self.identify_row(event.y))])
+        self.refill(event)
+        """if self.identify_region(event.x,event.y)=="separator":
+            [self.column(column=col,width=40) for col in self["columns"]]"""
     def pop(self,event):
         menu=tk.Menu(self.master,tearoff=False)
         menu.add_command( label="Change",command=lambda event=event:self.refill(event))
         menu.add_command(label="Save",command=self.save)
+        def cmd():
+            self.temp=tk.Toplevel()
+            self.temp.geometry("200x200")
+        self.cmds["top_level"]=cmd
+        menu.add_command(label="info",command=self.cmds["top_level"])
         menu.add_separator()
         menu.add_command(label="Exit",command=menu.destroy)
         menu.tk_popup(event.x_root,event.y_root)
       
 
-    def on_enter(self,event:tk.Event,col:str,ID:str,func):
+    def on_enter(self,event,col:str,ID:str,func):
 
         # get the data inside the entry
-        
-        new_text=event.widget.get()
-        
+        if isinstance(event, tk.Event):
+            wiget=event.widget
+            
+        else:
+            wiget=event
+
+        new_text=wiget.get()
         # using ID to access the current value in the selected row
         
         selected_values=self.item(ID).get("values")
@@ -52,8 +93,8 @@ class TreeView_Edit(ttk.Treeview):
         
         # dont forget to destroy the entry widget.
         
-        event.widget.destroy()
-        func([self.ID_to_row(ID),col,selected_values[col]])
+        wiget.destroy()
+        func([self.get_children().index(ID),col,new_text])
     
     def add_data(self,data,row,col):
         ID=self.get_children()[row]
@@ -61,29 +102,30 @@ class TreeView_Edit(ttk.Treeview):
         data_T[col]=data
         self.item(ID,values=data_T,tags="new")
         
+    def set_default(self,dif:list[list]):
 
+        self.default=dif
+    
 
 
     def bind(self,identifier:str,func):
         
         # change the binding function of "select" event to a custom function, designed for better customizing the module for external usrsers
         if identifier=="<Button-1>":
-            super().unbind("<Button-1>")
-            super().bind(identifier,lambda event:func(self.on_select(event)))
+            self.params["select_func"]=func
         elif identifier=="<Return>":
             self.params["Enter_func"]=func
+        elif identifier=="<Double-Button-1>":
+            self.params["refill_func"]=func
     def on_select(self,event):
         
         # on calling "select" the data of the selected cell will be generated and returned
         
         out=self.find(event)
-        
+        self.params["select_func"]([self.get_children().index(self.identify_row(event.y))])
         return out
         
-    def ID_to_row(self,ID):
-        data=self.item(ID).get("values")
-        row=data[0]
-        return row
+    
 
     def find(self,event):
         
@@ -123,14 +165,16 @@ class TreeView_Edit(ttk.Treeview):
 
 
     def refill(self,event=None,row=None):
+        
         if event is not None:
             selected_ID=self.identify_row(event.y)
             print(selected_ID)
             out=self.find(event)
+            print(out,self.get_children())
         elif row is not None:
             try:
                 
-                selected_ID=self.get_children()[row]
+                selected_ID=f"row{row}"
                 out=[row,self.col,self.item(selected_ID).get("values")]
             except Exception as e:
                 print(e)
@@ -155,14 +199,13 @@ class TreeView_Edit(ttk.Treeview):
             self.col=col
             # getting the coordinate of the cell in the frame 
 
-            coord=self.bbox(selected_ID,col)
+            coord=self.bbox(selected_ID,self["columns"][col])
 
             entry_edit=tk.Entry(self.master)
 
             # putting an entry widget right on the coordinate with the same size
-
+            print(col)
             entry_edit.place(x=coord[0],y=coord[1],width=coord[2],height=coord[3])
-
             # selecting all in entry widget
 
             entry_edit.select_range(0,tk.END)
@@ -173,7 +216,27 @@ class TreeView_Edit(ttk.Treeview):
 
             # focus on the entry widget 
 
-            entry_edit.focus()
+            entry_edit.focus_force()
+            menu=tk.Menu(self.master,tearoff=False)
+
+            def cmd(item):
+                entry_edit.delete(0,tk.END)
+                entry_edit.insert(0,item)
+                self.on_enter(entry_edit,col,selected_ID,func=self.params["Enter_func"])
+
+            if self.default:
+                for r in self.default:
+                    if col==r[0]:
+                        for item in r[1:]:
+                            menu.add_command(label=item,command=lambda item=item:cmd(item))
+                        tree_x = self.winfo_rootx()
+                        tree_y = self.winfo_rooty()
+                        x = tree_x + coord[0]
+                        y = tree_y + coord[1]+coord[3]
+                        menu.tk_popup(x=x,y=y)
+                        menu.grab_release()  # Release the grab so the entry can still receive input.
+                        entry_edit.focus_force()
+
 
             # bind <focus out> to be able to destroy entry widget while the mouse is not on the entry anymore
 
@@ -202,21 +265,19 @@ class TreeView_Edit(ttk.Treeview):
       
         self.focus(ID)
 
+    def extract_data(self):
+        row_ids=self.get_children()
+        out=[self["columns"]]
+        for id in row_ids:
+            out.append(self.item(id).get("values"))
+        return out
+    
     def save(self):
-   
         file=filedialog.asksaveasfilename(confirmoverwrite=True,filetypes=(
         ("Text files", "*.txt"),
         ("excel", ("*.csv", "*.xml")),
         ("All Files", "*.*")))
-
-   
-        row_ids=self.get_children()
-        out=[self["columns"]]
-   
-        for id in row_ids:
-            out.append(self.item(id).get("values"))
-        
-
+        out=self.extract_data()
         if file is not None:
   
             format=file.split("/")[-1].split(".")[-1]
@@ -278,7 +339,7 @@ class Table:
         
         # insert values of the table in addition to the first column that involve indexes
         
-        [self.table.insert(parent="",index=tk.END,values=np.insert(value,0,i).tolist()) for i,value in enumerate(table.values)]
+        [self.table.insert(parent="",index=tk.END,iid=f"row{i}",values=np.insert(value,0,i).tolist()) for i,value in enumerate(table.values)]
         
         # configuring columns format 
         
@@ -316,6 +377,7 @@ if __name__=="__main__":
     root=tk.Tk()
     table=pd.DataFrame(np.zeros((4,4)),columns=[i for i in range(4)])
     table=Table(root,table)
+    table.table.set_default([[2,"kdfjlvhsa","lsdfvhdls","slsdfhsdlhj","zfhsalh"]])
     #print(table.h_scroll)
-    table.table.go_to(2)
+    table.table.go_to(2 )
     root.mainloop()
