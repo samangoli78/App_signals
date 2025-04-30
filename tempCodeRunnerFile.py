@@ -1,1 +1,0 @@
-new_text=wiget.get()

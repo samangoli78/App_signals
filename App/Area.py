@@ -1,5 +1,5 @@
 
-from Shades import Shades
+from .Shades import Shades
 import matplotlib.lines as lines
 
 class Area(Shades):
@@ -67,7 +67,7 @@ class Area(Shades):
 
     def releaseonclick(self, event=None):
 
-        self.app:App
+        self.app
         self.app.canvas.mpl_disconnect(self.releaser)
         self.app.canvas.mpl_disconnect(self.follower)
         self.arg_second=self.x

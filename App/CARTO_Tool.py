@@ -2,7 +2,7 @@ import os,re
 import numpy as np
 import pandas as pd
 from collections import Counter
-from PARSER_Tool import Parser_carto
+from .PARSER_Tool import Parser_carto
 import tkinter as tk
 from tkinter import filedialog
 import time

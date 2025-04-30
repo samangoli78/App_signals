@@ -1,5 +1,4 @@
 import os
-from CARTO_Tool import Carto
 import numpy as np
 import tkinter as tk
 from tkinter import ttk
@@ -17,18 +16,19 @@ class TreeView_Edit(ttk.Treeview):
         self.cmds={}
         self.default=None
         master:tk.Tk
-        self.params["Enter_func"]=lambda x:print(x)
-        self.params["select_func"]=lambda x:print(x)
-        self.params["refill_func"]=lambda x:print(x)
+        self.params["Enter_func"]=lambda x:print(x,"Enter_func")
+        self.params["select_func"]=lambda x:print(x,"select_func")
+        self.params["refill_func"]=lambda x:print(x,"refill_func")
         def_func=lambda event:print(event)
         for f in ["Focus_out_func","Focus_in_func","Enter_func","right_click_func","left_click_func"]:
             if f not in self.params.keys():
                 self.params.update({f:def_func})
         super().bind("<Button-3>",self.pop)
-        super().bind("<Button-1>",self.on_select)
-        super().bind("<FocusOut>",self.params["Focus_out_func"])
+        #super().bind("<Button-1>",self.on_select)
+        super().bind("<Button-2>",self.on_select)
+        #super().bind("<FocusOut>",self.params["Focus_out_func"])
         super().bind("<Double-Button-1>",self.double_click)
-        super().bind("<FocusIn>",self.params["Focus_in_func"])
+        #super().bind("<FocusIn>",self.params["Focus_in_func"])
         self.temp=None
         def cmd(event):
             if self.temp is None:
@@ -47,7 +47,8 @@ class TreeView_Edit(ttk.Treeview):
         self.master=master
          
     def double_click(self,event):
-        self.params["refill_func"]([self.get_children().index(self.identify_row(event.y))])
+        #self.params["refill_func"]([self.get_children().index(self.identify_row(event.y))])
+        self.params["select_func"]([self.get_children().index(self.identify_row(event.y))])
         self.refill(event)
         """if self.identify_region(event.x,event.y)=="separator":
             [self.column(column=col,width=40) for col in self["columns"]]"""
@@ -70,9 +71,11 @@ class TreeView_Edit(ttk.Treeview):
         # get the data inside the entry
         if isinstance(event, tk.Event):
             wiget=event.widget
+            print("enter executed from pushing enter")
             
         else:
             wiget=event
+            print("enter executed after special selecting dropdown")
 
         new_text=wiget.get()
         # using ID to access the current value in the selected row
@@ -94,7 +97,16 @@ class TreeView_Edit(ttk.Treeview):
         # dont forget to destroy the entry widget.
         
         wiget.destroy()
-        func([self.get_children().index(ID),col,new_text])
+        #self.get_children().index(ID) is row number
+        self.params["Enter_func"]([self.get_children().index(ID),col,new_text])
+
+    def on_select(self,event):
+        
+        # on calling "select" the data of the selected cell will be generated and returned
+        
+        out=self.find(event)
+        self.params["select_func"]([self.get_children().index(self.identify_row(event.y))])
+        return out
     
     def add_data(self,data,row,col):
         ID=self.get_children()[row]
@@ -117,13 +129,9 @@ class TreeView_Edit(ttk.Treeview):
             self.params["Enter_func"]=func
         elif identifier=="<Double-Button-1>":
             self.params["refill_func"]=func
-    def on_select(self,event):
-        
-        # on calling "select" the data of the selected cell will be generated and returned
-        
-        out=self.find(event)
-        self.params["select_func"]([self.get_children().index(self.identify_row(event.y))])
-        return out
+        elif identifier=="<Button-2>":
+            self.params["select_func"]=func
+    
         
     
 
@@ -168,9 +176,7 @@ class TreeView_Edit(ttk.Treeview):
         
         if event is not None:
             selected_ID=self.identify_row(event.y)
-            print(selected_ID)
             out=self.find(event)
-            print(out,self.get_children())
         elif row is not None:
             try:
                 
@@ -204,7 +210,7 @@ class TreeView_Edit(ttk.Treeview):
             entry_edit=tk.Entry(self.master)
 
             # putting an entry widget right on the coordinate with the same size
-            print(col)
+
             entry_edit.place(x=coord[0],y=coord[1],width=coord[2],height=coord[3])
             # selecting all in entry widget
 
@@ -216,7 +222,7 @@ class TreeView_Edit(ttk.Treeview):
 
             # focus on the entry widget 
 
-            entry_edit.focus_force()
+            entry_edit.focus_set()
             menu=tk.Menu(self.master,tearoff=False)
 
             def cmd(item):
@@ -234,17 +240,16 @@ class TreeView_Edit(ttk.Treeview):
                         x = tree_x + coord[0]
                         y = tree_y + coord[1]+coord[3]
                         menu.tk_popup(x=x,y=y)
-                        menu.grab_release()  # Release the grab so the entry can still receive input.
-                        entry_edit.focus_force()
+                        entry_edit.focus_set()
 
-
-            # bind <focus out> to be able to destroy entry widget while the mouse is not on the entry anymore
+                    
 
             entry_edit.bind("<FocusOut>",lambda event: event.widget.destroy())
+            #menu.bind("<FocusOut>",lambda event: event.widget.destroy())
 
             # bind enter, to be able to save entry data to the selected cell and then destroy the entry widget
 
-            entry_edit.bind("<Return>",lambda event,selected_column=col,selected_ID=selected_ID,
+            entry_edit.bind("<Return>",lambda event,selected_column=col,selected_ID=selected_ID
                             :self.on_enter(event,selected_column,selected_ID,func=self.params["Enter_func"]))
             
     def go_to(self,row):
