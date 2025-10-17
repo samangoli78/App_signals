@@ -37,7 +37,7 @@ class App(tk.Tk):
     low_b1=[250]
     len_hann=[5]
     max_pooling_length=[1]
-    TH=[0.15]
+    TH=[0.45]
     def __init__(self, name="Saman", carto:Carto=None):
         self.forcefull=False
         self.apps.append(self)
@@ -729,13 +729,35 @@ class App(tk.Tk):
     def Energy(self,ax,x,y,legends=None):   
         #stft_=librosa.stft(y,n_fft=100,hop_length=1,win_length=35,window="hann",center=True)
         #Xdb_=np.abs(stft_)
-        freqs,time,mags=librosa.reassigned_spectrogram(y,n_fft=int(App.win_length[0])+25,hop_length=int(App.hop_length[0]),win_length=int(App.win_length[0]),window="hann",center=True)
-
+        freqs,time,mags=librosa.reassigned_spectrogram(y,n_fft=int(App.win_length[0])+100,hop_length=int(App.hop_length[0]),win_length=int(App.win_length[0]),window="hann",center=True,sr=1000)
+        print(freqs,time)
+        time=time.flatten()+x.min()
+        freqs=freqs.flatten()
+        from scipy.stats import binned_statistic_2d
+        print(x.min(),x.max())
+        time_bins = np.arange(x.min(),x.max(), 0.001)
+        freq_bins = np.linspace(0, 500, mags.shape[0])
         Xdb_=mags
+        print(time_bins,time)
+        magnitude=np.abs(mags.flatten())
+        H_count, _, _, _ = binned_statistic_2d(
+            time, freqs, magnitude,
+            statistic='count', bins=[time_bins, freq_bins]
+        )
+        mask=H_count == 0
+        H_count[mask]=1
+        H_sum, _, _, _ = binned_statistic_2d(
+            time, freqs, magnitude,
+            statistic='sum', bins=[time_bins, freq_bins]
+        )
+        H_sum=H_sum/H_count
 
+
+        Xdb_=H_sum.T
+        print(Xdb_.shape,Xdb_)
         freq=Xdb_.shape[0]
         len_han=int(App.len_hann[0])
-        y__=np.sum(Xdb_[freq//5:,:],0)/Xdb_.shape[0]
+        y__=np.mean(Xdb_[freq//5:,:],0)
         
         window=np.ones(len_han)
         #y__=minmax_scale(y__, feature_range=(0, 1), axis=0, copy=True)
@@ -743,11 +765,11 @@ class App(tk.Tk):
         x=np.linspace(x.min(),x.max(),len(y_high))
 
         #y__=np.sum(Xdb_[1:freq//2,:],0)/Xdb_.shape[0]
-        y__=np.sum(Xdb_[int(freq*App.low_b0[0]/500):int(freq*App.low_b1[0]/500),:],0)/Xdb_.shape[0]
+        y__=np.mean(Xdb_[int(freq*App.low_b0[0]/500):int(freq*App.low_b1[0]/500),:],0)
         #y__=minmax_scale(y__, feature_range=(0, 1), axis=0, copy=True)
                 
         y_low=np.convolve(y__,window,mode="same")/np.sum(window)
-        y__=np.sum(Xdb_[:,:],0)/Xdb_.shape[0]
+        y__=np.mean(Xdb_[:,:],0)
         #y__=minmax_scale(y__, feature_range=(0, 1), axis=0, copy=True)
         y_total=np.convolve(y__,window,mode="same")/np.sum(window)
         for key,state in self.check_boxes.items():

@@ -1,11 +1,14 @@
+from __future__ import annotations
 import os,re
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from CARTO_Tool import Carto
 class Parser_carto:
-    def __init__(self,carto=None):
+    def __init__(self,carto:"Carto"):
         self.carto=carto
         self.bipolar=None
         self.unipolar=None
@@ -14,10 +17,9 @@ class Parser_carto:
     def parse_mesh_file(self):
         vertices = []
         triangles = []
-        name=""
-        for m in [i for i in [x for x,y in self.carto.files_cat()] if i.endswith(".mesh")]:
-            name+=m
-        with open(os.path.join(self.carto.path,m), 'r',errors="ignore") as file:
+        main_meshes=[name for name in os.listdir(self.carto.path) if name.endswith(".mesh") and self.carto.maps[self.carto.i] in name]
+        print(main_meshes)
+        with open(os.path.join(self.carto.path,main_meshes[0]), 'r',errors="ignore") as file:
             lines = file.readlines()
             vertices_section = False
             triangles_section = False
@@ -54,18 +56,15 @@ class Parser_carto:
         faces = np.hstack([[3] + list(tri) for tri in triangles])
         return [vertices, faces]
     
-    def pars_mesh_file_with_electrode(self,file=None):
+    def pars_mesh_file_with_electrode(self):
         vertices = []
         triangles = []
         unipolar_values = []
         bipolar_values = []
-        if not file:
-            name=""
-            for m in [i for i in [x for x,y in self.carto.files_cat()] if i.endswith(".mesh")]:
-                name+=m
-            path=os.path.join(self.carto.path,name)
-        else:
-            path=file
+        LAT_values = []
+        main_meshes=[name for name in os.listdir(self.carto.path) if name.endswith(".mesh") and self.carto.maps[self.carto.i] in name]
+        print(main_meshes)
+        path=os.path.join(self.carto.path,main_meshes[0])
         with open(path, 'r',errors="ignore") as file:
             lines = file.readlines()
             vertices_section = False
@@ -108,11 +107,13 @@ class Parser_carto:
                     colors = parts[1].strip().split()
                     unipolar_values.append(float(colors[0]))
                     bipolar_values.append(float(colors[1]))
+                    LAT_values.append(float(colors[2]))
         self.unipolar=np.array(unipolar_values)
         self.bipolar=np.array(bipolar_values)
+        self.LAT=np.array(LAT_values)
         self.vertices=np.array(vertices)
         self.triangles=np.array(triangles)
-        return np.array(vertices), np.array(triangles), np.array(unipolar_values), np.array(bipolar_values)
+        return np.array(vertices), np.array(triangles), np.array(unipolar_values), np.array(bipolar_values),np.array(LAT_values)
     
 
     
