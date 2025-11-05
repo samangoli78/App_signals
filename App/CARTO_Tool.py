@@ -201,7 +201,7 @@ class Carto(Parser_carto):
             df = pd.read_csv(
                 os.path.join(self.path,i),
                 skiprows=3,
-                sep=r" ",             # <- instead of delim_whitespace=True
+                sep=r"\s+",             # <- instead of delim_whitespace=True
                 names=cols,
                 dtype=np.float32,
                 engine="c",
