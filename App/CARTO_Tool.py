@@ -181,6 +181,9 @@ class Carto(Parser_carto):
                 )
         else:
             print("could not process")
+    
+
+
     def Signals(self,triple=False):
         data=self.electrodes(triple)
         
@@ -205,6 +208,7 @@ class Carto(Parser_carto):
                 names=cols,
                 dtype=np.float32,
                 engine="c",
+                skip_blank_lines=True,
             )
 
             # scale in-place (vectorized)

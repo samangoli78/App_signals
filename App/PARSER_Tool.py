@@ -6,7 +6,7 @@ from sklearn.preprocessing import StandardScaler
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from CARTO_Tool import Carto
+    from .CARTO_Tool import Carto
 class Parser_carto:
     def __init__(self,carto:"Carto"):
         self.carto=carto
