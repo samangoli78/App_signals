@@ -38,10 +38,10 @@ def log(input:str,*args) -> str:
 
 class Carto(Parser_carto):
     cartos=[]
-    def __init__(self,path=None) -> None:
+    def __init__(self,path=None,i=None) -> None:
         Carto.cartos.append(self)
         super().__init__(self)
-        self.i=None
+        self.i=i
         self.cont=None
         if path and os.path.exists(path):
             self.path=path
@@ -79,25 +79,27 @@ class Carto(Parser_carto):
             return False
         
         self.maps=[i["Name"] for i in map_data]
-
-        print(log("options: ", {i:self.maps[i] for i in range(len(self.maps))}, "\nchoose your file with its index passing to set_cat_value method"))
-        self.root=tk.Tk()
-        
-        self.frames=[]
-        self.labels=[]
-        for i in range(len(self.maps)):
-            self.frames.append(tk.Frame(self.root))
-            self.frames[i].pack(fill=tk.X)
-            self.labels.append(tk.StringVar())
-            self.labels[i]=self.maps[i]
-            Button=tk.Button(self.frames[i],text=self.labels[i],command= lambda a=i : self.index(a), font=("timesnewroman", 10),)
+        if self.i is None:
+            print(log("options: ", {i:self.maps[i] for i in range(len(self.maps))}, "\nchoose your file with its index passing to set_cat_value method"))
+            self.root=tk.Tk()
             
-            Button.pack(expand=True,fill=tk.X)
-        self.root.attributes("-topmost",True)
-        self.root.after(150, lambda: self.root.attributes('-topmost', False))
-        self.root.protocol("WM_DELETE_WINDOW", self.quit)
-        self.root.geometry(f"{int(self.root.winfo_width())+25}x{int(self.root.winfo_height())+150}")
-        self.root.mainloop()
+            self.frames=[]
+            self.labels=[]
+            for i in range(len(self.maps)):
+                self.frames.append(tk.Frame(self.root))
+                self.frames[i].pack(fill=tk.X)
+                self.labels.append(tk.StringVar())
+                self.labels[i]=self.maps[i]
+                Button=tk.Button(self.frames[i],text=self.labels[i],command= lambda a=i : self.index(a), font=("timesnewroman", 10),)
+                
+                Button.pack(expand=True,fill=tk.X)
+            self.root.attributes("-topmost",True)
+            self.root.after(150, lambda: self.root.attributes('-topmost', False))
+            self.root.protocol("WM_DELETE_WINDOW", self.quit)
+            self.root.geometry(f"{int(self.root.winfo_width())+25}x{int(self.root.winfo_height())+150}")
+            self.root.mainloop()
+        else:
+            print(f"the map {self.maps[self.i]} was already selected" )
     def quit(self):
         self.root.quit()
         self.root.destroy() 
@@ -181,9 +183,6 @@ class Carto(Parser_carto):
                 )
         else:
             print("could not process")
-    
-
-
     def Signals(self,triple=False):
         data=self.electrodes(triple)
         
@@ -201,6 +200,7 @@ class Carto(Parser_carto):
                 header_line = f.readline().strip()          # line 2
             gain = float(gain_line.split("=")[-1])
             cols = [m.split("(")[0] for m in header_line.split()]  # strip "(...)" suffixes
+
             df = pd.read_csv(
                 os.path.join(self.path,i),
                 skiprows=3,
@@ -210,7 +210,6 @@ class Carto(Parser_carto):
                 engine="c",
                 skip_blank_lines=True,
             )
-
             # scale in-place (vectorized)
             df *= gain
 

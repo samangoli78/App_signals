@@ -39,8 +39,21 @@ class App(tk.Tk):
     max_pooling_length=[1]
     TH=[0.45]
     def __init__(self, name="Saman", carto:Carto=None):
+        # make *new copies* so each instance has independent lists
+        self.n_fft = App.n_fft.copy()
+        self.hop_length = App.hop_length.copy()
+        self.win_length = App.win_length.copy()
+        self.high_b0 = App.high_b0.copy()
+        self.high_b1 = App.high_b1.copy()
+        self.low_b0 = App.low_b0.copy()
+        self.low_b1 = App.low_b1.copy()
+        self.len_hann = App.len_hann.copy()
+        self.max_pooling_length = App.max_pooling_length.copy()
+        self.TH = App.TH.copy()
+        App.apps.append(self)
+
+
         self.forcefull=False
-        self.apps.append(self)
         self.is_running=True
         self.carto = carto
         self.cont = self.carto.cont
@@ -53,12 +66,18 @@ class App(tk.Tk):
         #self.i_j_to_index(labels="hide")
         self.i_j_to_index(labels="hide")
         self.creating_delta()
+        all_columns = self.carto.cont[0][0].columns
+        self.Table = pd.DataFrame(self.Table, columns=all_columns)
+
+        # sanity check: lengths must match
+        n = len(self.to_i_j)
+        if len(self.Table) != n:
+            raise ValueError(f"Row count mismatch: Table={len(self.Table)} vs index map={n}")
         # going to the first item of the list, which is arbitrary and could be any other numbers, 
         # and accesss the first element that is a dataframe containing information of the points
-        all_columns=self.carto.cont[0][0].columns
-        self.Table=pd.DataFrame(self.Table,columns=all_columns)
-        self.Table=pd.concat([self.Table,pd.DataFrame(np.zeros(len(self.to_i_j)),columns=["Coment"])],axis=1)
-        self.Table=pd.concat([self.Table,pd.DataFrame(np.zeros(len(self.to_i_j)),columns=["delta"])],axis=1)
+
+        self.Table = self.Table.assign(Comment="", delta=pd.Series(self.delta, dtype=object))
+
 
     def creating_delta(self):
         #delta is a list of dictionaries that contains the information about the stimulations and sinus signals.
@@ -66,7 +85,9 @@ class App(tk.Tk):
         self.delta=[0]*len(self.to_i_j)
         
     def i_j_to_index(self,labels="unhide"):
+        #"takes i , j gives index"
         self.to_index=[]
+        #"takes index give i_j"
         self.to_i_j=[]
         self.labels_memory=[]
         carto=self.carto
@@ -74,20 +95,23 @@ class App(tk.Tk):
         # structure of the cont: [section1,section2,section3,...]
         # structure of the section: [dataframe, name of the file, signals]
         for i,section in enumerate(carto.cont):
+            df,_,_=section
             self.to_index.append([])
             self.labels_memory.append([])
             section: tuple[pd.DataFrame, str, pd.DataFrame]
-            for j,dat in enumerate(section[0].values):
-                self.labels_memory[i].append(carto.cont[i][0].loc[j,"label_color"])
+            col = "label_color"
+            col_idx = df.columns.get_loc(col)  # for fast iat use
+            for j in range(len(df)):
+                self.labels_memory[i].append(df.iat[j, col_idx])
                 #hiding the labels
                 if labels=="hide":
-                    carto.cont[i][0].loc[j,"label_color"]=""
+                    df.iat[j, col_idx] = ""
                 # i,j to index
                 self.to_index[i].append(ind)
                 #indexs to i,j
                 self.to_i_j.append([i,j])
                 # updating the table matrix
-                self.Table.append(dat)
+                self.Table.append(df.iloc[j].values)
                 # increaing the index after each nested itteration
                 ind+=1
                 
@@ -154,7 +178,7 @@ class App(tk.Tk):
             width = root.winfo_width()
             height = root.winfo_height()    #get details about window
             takescreenshot = ImageGrab.grab(bbox=(x, y, x+width, y+height))
-            takescreenshot.save(name,dpi=(1920,1080))
+            takescreenshot.save(name,dpi=500)
 
     def triple_protocol(self,event=None):
 
@@ -464,7 +488,10 @@ class App(tk.Tk):
         #    ax.scatter((indexes[0]+self.arg[arg][0])*0.001,y2[indexes[0]+self.arg[arg][0]],s=2,color="black")
     
         ax.set_title(self.cont[self.i][0]["label_color"].values[self.j])
-        self.create_legend(leg=ax.get_legend_handles_labels(),canvas=self.ccs[ax_object.key],addition=addition)
+        try:
+            self.create_legend(leg=ax.get_legend_handles_labels(),canvas=self.ccs[ax_object.key],addition=addition)
+        except:
+            pass
         #ax.legend(fontsize=8)
         ax_object.set()
         
@@ -480,8 +507,10 @@ class App(tk.Tk):
         # load the data
         data_pd=self.cont[self.i][2]
         x=data_pd.index
+        car:pd.DataFrame
         car=self.cont[self.i][0]
-        y2=data_pd.loc[:,car.loc[self.j,"bipolar"]].values
+        
+        y2=data_pd.loc[:,car.iat[self.j, car.columns.get_loc("bipolar")]].values
         V5=data_pd.loc[:,"V5"].values
         V5=butter_bandpass_filter(data=V5,cutoff=[5,180],fs=1000,order=2)
         try:
@@ -500,13 +529,14 @@ class App(tk.Tk):
         
 
         # this loop is for when the Only green check box is activated, it will checks the labels untill one of the labels in the list will show up. otherwise it will continue searching. 
-        if self.check_boxes["Only_Green"].get() and not np.isin(self.cont[self.i][0].values[self.j][0].upper(),["VERDE","VER","GREEN","POSITIVE","POS"]) :
+
+        if self.check_boxes["Only_Green"].get() and not np.isin(car.iat[self.j,car.columns.get_loc("label_color")].upper(),["VERDE","VER","GREEN","POSITIVE","POS"]) :
             if self.direction>=0:
                 self.p_increase()
-                return
+                return None
             else:
                 self.p_decrease()
-                return
+                return None
 
         # make another pointer to the axes dictionary for easing of access
         axes=self.axes
@@ -526,7 +556,7 @@ class App(tk.Tk):
             
             ax=axes["top"]
             ax.ax.plot(x,y2,alpha=0.5,linewidth=0.6)
-            ax.ax.set_title(car.loc[self.j,"label_color"])
+            ax.ax.set_title(car.iat[self.j,car.columns.get_loc("label_color")])
             ax.set()
             
         # plotting refferences
@@ -552,6 +582,7 @@ class App(tk.Tk):
         #plt.savefig(r"C:\Users\cardio\Desktop\Output case 1 26_7_2024\out_{i}_{x}_{j}.jpeg".format(j=j_,x=cont[i_][1][:-4],i=i_))
         self.canvas.draw_idle()
         self.update()
+        return True
         
             
      
@@ -593,8 +624,12 @@ class App(tk.Tk):
             self.forcefull=False
         for i in self.axes.values():
             i.ax.clear()
-        self.plot()
-        self.label.config(text=f"point {self.cont[self.i][0].reset_index(drop=True)['point number'][self.j]}")
+        result=self.plot()
+        if not result :
+            return
+        car:pd.DataFrame  
+        car=self.cont[self.i][0]
+        self.label.config(text=f"point {car.iat[self.j,car.columns.get_loc('point number')]}")
         self.canvas.draw()
         print("current index",self.to_index[self.i][self.j])
         self.table.table.go_to(self.to_index[self.i][self.j])
@@ -735,7 +770,8 @@ class App(tk.Tk):
         freqs=freqs.flatten()
         from scipy.stats import binned_statistic_2d
         print(x.min(),x.max())
-        time_bins = np.arange(x.min(),x.max(), 0.001)
+        time_bins = np.linspace(x.min(), x.max(), int((x.max()-x.min())/0.001) + 1)
+
         freq_bins = np.linspace(0, 500, mags.shape[0])
         Xdb_=mags
         print(time_bins,time)

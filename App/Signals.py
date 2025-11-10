@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 from scipy.interpolate import interp1d,CubicSpline
 from sklearn.preprocessing import minmax_scale
-from scipy.ndimage import binary_closing
+from scipy.ndimage import binary_closing,gaussian_filter1d, label
     
 import cv2   
 
@@ -79,77 +79,68 @@ def butter_bandpass_filter(data, cutoff=60, fs=1000, order=None):
     y = filtfilt(b, a, data)
     return y
 
-def derivative(y):
-    yt=np.append(y,0)
-    dy=np.array([(yt[i]-yt[i-1])/0.001 for i in np.arange(1,len(yt))])
+def derivative(y, step=0.001):
+    y = np.asarray(y, dtype=np.float64)
+    dy = np.diff(y) / step
     return dy
-def apply_closing(binary_signal, structure_size=5):
-    structure = np.ones(structure_size)
-    return binary_closing(binary_signal, structure=structure)
-def find_start(x,y,length=7,ax=None,operation="min",Th=0.2,alpha=0.5):
-    #if y.max()<0.2:
-    #    Th+=0.2
-    #else:
-    #    pass
-    #y=minmax_scale(y, feature_range=(0, 1), axis=0, copy=True)
-    y_paded=zero_pad_signal(y,pad_left=10,pad_right=10)
-    Th=otsu_threshold(y_paded,alpha=alpha)
-    #window=np.array([1]*length)
-    #out=[]
-    #for i,value in enumerate(y):
-    #    start=i-length+1
-    #    end=i
-    #    if start<0:
-    #        start=0
-        
-        #w=window[:end+1]*y[start:end+1]
-    #    w=y[start:end+1]
-    #    if operation =="min":
-    #        out.append(w.min())
-    #    else:
-    #        out.append(w.max())
-    #out=np.array(out)
-    out=np.array(y)
-    cs=interp1d(x,out)
-    xs=np.arange(x.min(),x.max(),0.001)
-    out=cs(xs)
-    out_paded=zero_pad_signal(out,pad_left=10,pad_right=10)
-    out=np.array([1 if ii>Th else 0 for ii in out_paded])
-    out=apply_closing(out,15)
 
+def find_start(x, y, length=7, ax=None, operation="min", Th=0.2, alpha=0.5):
+    """
+    Detect the start–end region of activity in a 1-D signal y(x).
+    Organized in conceptual 'levels' for clarity.
+    """
 
+    # ---------------- LEVEL 1: Pre-processing ----------------
+    # Smooth signal with a small Gaussian kernel to suppress noise
+    y_smooth = gaussian_filter1d(y, sigma=2)
 
-    #out1=np.append(out,0)
-    out1=out
-    output=[]
-    start=0
-    end=-1
-    in_1=False
-    for ii,val in enumerate(out1):
-        if val==1 and in_1==False:
-            start=ii
-            in_1=True
-        elif val==0 and in_1==True:
-            end=ii
-            in_1=False
-            if end-start>5:
-                output.append([start-10,end-10,end-start])
-    index=np.argsort(np.array([val[2] for val in output]))
-    out1=[]
-    for ii in index:
-        out1.append([output[ii][jj] for jj in range(2)])
-        
-    
-    if not isinstance(ax,type(None)):
-        pass
-        #ax.plot(xs,out)
-        #ax.plot(x,y)
-    try:
-        return out1[-1]
-    except:
+    # Compute threshold adaptively (Otsu method, user-defined)
+    Th = otsu_threshold(y_smooth, alpha=alpha)
+
+    # ---------------- LEVEL 2: Interpolation ----------------
+    # Resample to a dense uniform grid (~0.001 step) so we can detect edges precisely
+    step = 0.001
+    N = len(y_smooth)
+    xs = np.linspace(x.min(), x.max(), N)
+    cs = interp1d(x, y_smooth, kind="linear", bounds_error=False, fill_value="extrapolate")
+    out = cs(xs)
+    # >>> Added fixed zero padding <<<
+    out = np.pad(out, (10, 10), mode="constant", constant_values=0)
+    # ---------------- LEVEL 3: Thresholding ----------------
+    # Create a binary mask for regions above threshold
+    out = np.array([1 if val > Th else 0 for val in out], dtype=bool)
+
+    # ---------------- LEVEL 4: Morphological Closing ----------------
+    # Merge small gaps and noise with morphological closing
+    out = binary_closing(out, structure=np.ones(15, dtype=bool))
+
+    # ---------------- LEVEL 5: Segment Detection ----------------
+    # Label contiguous True regions and pick the longest one
+    labels, num = label(out)
+    if num == 0:
         return None
-    
 
+    sizes = np.array([(labels == k).sum() for k in range(1, num + 1)])
+    kmax = 1 + int(np.argmax(sizes))
+    idx = np.flatnonzero(labels == kmax)
+
+    if len(idx) < 5:  # too short to be meaningful
+        return None
+
+    start_idx, end_idx = int(idx[0]), int(idx[-1])
+    start_idx -= 10
+    end_idx   -= 10
+
+    # ---------------- LEVEL 6: Visualization (optional) ----------------
+    if ax is not None:
+        ax.plot(xs, y_smooth)
+        #ax.axhline(Th, color='r', ls='--', label='threshold')
+        ax.fill_between(xs[start_idx:end_idx], 0, y_smooth[start_idx:end_idx],
+                        color='orange', alpha=0.3)
+        ax.legend()
+
+    # ---------------- LEVEL 7: Output ----------------
+    return [start_idx, end_idx]
 
 
 def custom_threshold_1d(signal,alpha=0.5):

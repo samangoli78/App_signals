@@ -3,10 +3,11 @@ import os,re
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+import vtk
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from .CARTO_Tool import Carto
+    from CARTO_Tool import Carto
 class Parser_carto:
     def __init__(self,carto:"Carto"):
         self.carto=carto
@@ -116,7 +117,68 @@ class Parser_carto:
         return np.array(vertices), np.array(triangles), np.array(unipolar_values), np.array(bipolar_values),np.array(LAT_values)
     
 
-    
+    def save_mesh_toVTK(self,fname="output.vtp",abs_path=None):
+        verts,faces,uni,bi,lat=self.pars_mesh_file_with_electrode()
+        #def write_mesh_multi_scalar_vtp_vtk(verts, faces, scalars_dict, fname):
+        if abs_path is None:
+            abs_path = os.getcwd()
+        elif not os.path.isdir(abs_path):
+            print(f"[Warning] Invalid path: {abs_path}. Using current directory instead.")
+            abs_path = os.getcwd()
+        else:
+            abs_path = os.path.abspath(abs_path)
+        if fname is None:
+            fname = "output.vtp"
+        elif not fname.lower().endswith(".vtp"):
+            fname += ".vtp"
 
+        # 3. Compose final output file path
+        fullpath = os.path.join(abs_path, fname)
+
+        V = np.asarray(verts, float)
+        F = np.asarray(faces, np.int64)
+        scalar_dict={"unipolar":uni,"bipolar":bi,"LAT":lat}
+        pts = vtk.vtkPoints()
+        pts.SetDataTypeToFloat()
+        pts.SetNumberOfPoints(V.shape[0])
+        for i, p in enumerate(V):
+            pts.SetPoint(i, float(p[0]), float(p[1]), float(p[2]))
+
+        polys = vtk.vtkCellArray()
+        for tri in F:
+            cell = vtk.vtkTriangle()
+            cell.GetPointIds().SetId(0, int(tri[0]))
+            cell.GetPointIds().SetId(1, int(tri[1]))
+            cell.GetPointIds().SetId(2, int(tri[2]))
+            polys.InsertNextCell(cell)
+
+        poly = vtk.vtkPolyData()
+        poly.SetPoints(pts)
+        poly.SetPolys(polys)
+
+        pd = poly.GetPointData()
+        n = V.shape[0]
+        for name, arr in scalar_dict.items():
+            a = np.asarray(arr, float).ravel()
+            if a.size != n:
+                raise ValueError(f"Scalar '{name}' has length {a.size}, expected {n}")
+            va = vtk.vtkFloatArray()
+            va.SetName(str(name))
+            va.SetNumberOfComponents(1)
+            va.SetNumberOfTuples(n)
+            for i, v in enumerate(a):
+                va.SetValue(i, float(v))  # np.nan passes through
+            pd.AddArray(va)
+            # Make the first array the active scalars for coloring
+            if pd.GetScalars() is None:
+                pd.SetScalars(va)
+
+        w = vtk.vtkXMLPolyDataWriter()
+        w.SetFileName(fullpath)
+        w.SetInputData(poly)
+        w.SetDataModeToAppended()   # binary blocks; NaNs preserved
+        w.EncodeAppendedDataOff()
+        w.Write()
+
+                    
                 
-            
