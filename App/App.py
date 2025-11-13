@@ -64,7 +64,7 @@ class App(tk.Tk):
         self.i, self.j = 0, 0
         self.Table=[]
         #self.i_j_to_index(labels="hide")
-        self.i_j_to_index(labels="hide")
+        self.i_j_to_index(labels="unhide")
         self.creating_delta()
         all_columns = self.carto.cont[0][0].columns
         self.Table = pd.DataFrame(self.Table, columns=all_columns)
@@ -353,6 +353,18 @@ class App(tk.Tk):
         ax=ax.ax
         ax.plot(x,y2,alpha=0.5,linewidth=0.6)
         egm=Triple_Extra(t=x,EGM=y2)
+        memory=self.delta[self.to_index[self.i][self.j]]
+        p_number_mem=None
+        label_mem=None
+        reject=False
+        if memory !=0:
+            p_number_mem=int(memory[0])
+            label_mem=memory[1]
+        
+        car=self.cont[self.i][0]
+        p_number=int(car.iat[self.j,car.columns.get_loc('point number')])
+        label=car.iat[self.j,car.columns.get_loc("label_color")]
+
         if len(reff)>0:
             egm.find_windows(self.axes["bot"].ax,stiulation=reff,refference=butter_bandpass_filter(data=self.cont[self.i][2]["V5"].values,cutoff=[5,180],fs=1000,order=2),margin=0)
         else:
@@ -360,7 +372,7 @@ class App(tk.Tk):
             reff=self.cont[self.i][2]["CS1"].values
         
         for ii in range(len(egm.stim_start)):
-            dont_save=False
+            detected=False
             A=Area(self,ind=ii)
             start=egm.stim_start[ii]
             end=egm.stim_start[ii]+egm.stim_duration[ii]
@@ -368,52 +380,54 @@ class App(tk.Tk):
             yy=y2[start+8:end-10]
             yy1=yy
             x_Energy,y_low,y_high,y_total=self.Energy(ax,xx,yy,legends=addition)
-            if self.delta[self.to_index[self.i][self.j]]==0 or self.forcefull:
-                output=find_start(x_Energy,y_low,length=2,ax=ax,operation=None,Th=0.15,alpha=App.TH[0])
+            if memory==0 or self.forcefull:
+                output=find_start(x_Energy,y_low,length=2,ax=None,operation=None,Th=0.15,alpha=self.TH[0])
                 if output is not None:
                     start_n=int(start+8+output[0])
                     end_n=int(start+8+output[1])
+                    detected=True
                 else:
                     start_n=start
                     end_n=end
-                    dont_save=True
+                    reject=True
+                    
             else:
-                memory=self.delta[self.to_index[self.i][self.j]][2]["stim"][ii]
-                if isinstance(memory,list) and len(memory)==2 :
-                    start_n,end_n=memory
+                data=memory[2]["stim"][ii]
+                
+                
+                if isinstance(data,list) and len(data)==2 and p_number_mem==p_number:
+                    start_n,end_n=data
+                    detected=True
                 else:
                     start_n=start
                     end_n=end
-                    dont_save=True
+                    
 
             xx=x[start_n:end_n]
             yy=y2[start_n:end_n]
-            if yy1.max()-yy1.min()>0.05 and not dont_save:
+            A.add_area(np.array([start_n,end_n]),ylim=ax_object.ylim,xlim=ax_object.xlim,color="green")
+            A.plot_area(ax)
+            self.Areas[arg].append(A)
+            self.canvas.mpl_connect('pick_event', A.clickonline)
+            ax.plot(xx,yy ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
+
+            if detected:
                 defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n)
                 defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n,inverse=True)
-                A.add_area(np.array([start_n,end_n]),ylim=ax_object.ylim,xlim=ax_object.xlim,color="green")
-                A.plot_area(ax)
-                self.Areas[arg].append(A)
-                self.canvas.mpl_connect('pick_event', A.clickonline)
-                ax.plot(xx,yy ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
                 c1["refs_stim"].append(egm.stim_ref[ii])
                 c1["stim"].append([start_n,end_n])
                 c1["voltage_stim"].append(yy1.max()-yy1.min())
                 c1["deflection_stim"].append(defl)
-            elif dont_save:
-                c1["refs_stim"].append(egm.stim_ref[ii])
-                c1["stim"].append(False)
-                c1["voltage_stim"].append(False)
-                c1["deflection_stim"].append(False)
             else:
                 c1["refs_stim"].append(egm.stim_ref[ii])
                 c1["stim"].append([start_n,end_n])
                 c1["voltage_stim"].append(yy1.max()-yy1.min())
                 c1["deflection_stim"].append(False)
+                
 
             
         for ii in range(len(egm.sinus_start)):
-            dont_save=False
+            detected=False
             start=egm.sinus_start[ii]
             end=egm.sinus_start[ii]+egm.sinus_duration[ii]
             if egm.stim_start[0]<start<egm.stim_start[-1]+egm.stim_duration[-1]:
@@ -427,57 +441,64 @@ class App(tk.Tk):
             yy1=yy
             x_Energy,y_low,y_high,y_total=self.Energy(ax,xx,yy,legends=addition)
             if self.delta[self.to_index[self.i][self.j]] == 0 or self.forcefull:
-                output=find_start(x_Energy,y_low,length=2,ax=ax,operation=None,Th=0.15,alpha=App.TH[0])
+                output=find_start(x_Energy,y_low,length=2,ax=None,operation=None,Th=0.15,alpha=self.TH[0])
                 if output is not None:
                     start_n=int(start+output[0])
                     end_n=int(start+output[1])
+                    detected=True
                 else:
                     start_n=start
                     end_n=end
-                    dont_save=True
+                    reject=True
+                    
             else:
                 try:
-                    memory=self.delta[self.to_index[self.i][self.j]][2]["sinus"][ii]
-                    if isinstance(memory,list) and len(memory)==2 :
-                        start_n,end_n=memory
+                    data=memory[2]["sinus"][ii]
+                    if isinstance(data,list) and len(data)==2 and p_number_mem==p_number:
+                        start_n,end_n=data
+                        detected=True
                     else:
                         start_n=start
                         end_n=end
-                        dont_save=True
+                        
                 except:
                     continue
 
 
             xx=x[start_n:end_n]
             yy=y2[start_n:end_n]
-            if yy1.max()-yy1.min()>0.05 and not dont_save:
+            A.add_area(np.array([start_n,end_n]),ylim=ax_object.ylim,xlim=ax_object.xlim,color="#A776AD")
+            A.plot_area(ax)
+            self.Areas[arg].append(A)
+            self.canvas.mpl_connect('pick_event', A.clickonline)
+            
+            ax.plot(xx,yy ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
+            if detected:
                 # argument value that is the duration to be shaded must be in numpy array format
                 defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n)
                 defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n,inverse=True)
-                A.add_area(np.array([start_n,end_n]),ylim=ax_object.ylim,xlim=ax_object.xlim,color="#A776AD")
-                A.plot_area(ax)
-                self.Areas[arg].append(A)
-                self.canvas.mpl_connect('pick_event', A.clickonline)
-                
-                ax.plot(xx,yy ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
+
         
                 c1["refs_sinus"].append(egm.sinus_ref[ii])
                 c1["sinus"].append([start_n,end_n])
                 c1["voltage_sinus"].append(yy1.max()-yy1.min())
                 c1["deflection_sinus"].append(defl)
-            elif dont_save:
-                c1["refs_sinus"].append(egm.sinus_ref[ii])
-                c1["sinus"].append(False)
-                c1["voltage_sinus"].append(False)
-                c1["deflection_sinus"].append(False)
             else:
                 c1["refs_sinus"].append(egm.sinus_ref[ii])
                 c1["sinus"].append([start_n,end_n])
                 c1["voltage_sinus"].append(yy1.max()-yy1.min())
                 c1["deflection_sinus"].append(False)
+        idx=self.to_index[self.i][self.j]
+        if p_number_mem is not None and p_number_mem!=p_number :
+            raise ValueError("Mismatch in point number")
 
-
-        self.delta[self.to_index[self.i][self.j]]=[self.cont[self.i][0]["point number"].values[self.j],self.cont[self.i][0]["label_color"].values[self.j],c1]        
+        if p_number_mem is not None and p_number_mem == p_number:
+            final_label=label_mem
+        elif reject:
+            final_label="reject"
+        else:
+            final_label=label
+        self.delta[idx] = [str(p_number), final_label, c1]       
         self.table.table.add_data(", ".join([f"{key}: {', '.join([str(ii) for ii in value])}" for key,value in c1.items() if "voltage" not in key]),
                                                self.to_index[self.i][self.j],-1)
         
@@ -764,7 +785,7 @@ class App(tk.Tk):
     def Energy(self,ax,x,y,legends=None):   
         #stft_=librosa.stft(y,n_fft=100,hop_length=1,win_length=35,window="hann",center=True)
         #Xdb_=np.abs(stft_)
-        freqs,time,mags=librosa.reassigned_spectrogram(y,n_fft=int(App.win_length[0])+100,hop_length=int(App.hop_length[0]),win_length=int(App.win_length[0]),window="hann",center=True,sr=1000)
+        freqs,time,mags=librosa.reassigned_spectrogram(y,n_fft=int(self.win_length[0])+100,hop_length=int(self.hop_length[0]),win_length=int(self.win_length[0]),window="hann",center=True,sr=1000)
         print(freqs,time)
         time=time.flatten()+x.min()
         freqs=freqs.flatten()
@@ -792,7 +813,7 @@ class App(tk.Tk):
         Xdb_=H_sum.T
         print(Xdb_.shape,Xdb_)
         freq=Xdb_.shape[0]
-        len_han=int(App.len_hann[0])
+        len_han=int(self.len_hann[0])
         y__=np.mean(Xdb_[freq//5:,:],0)
         
         window=np.ones(len_han)
@@ -801,7 +822,7 @@ class App(tk.Tk):
         x=np.linspace(x.min(),x.max(),len(y_high))
 
         #y__=np.sum(Xdb_[1:freq//2,:],0)/Xdb_.shape[0]
-        y__=np.mean(Xdb_[int(freq*App.low_b0[0]/500):int(freq*App.low_b1[0]/500),:],0)
+        y__=np.mean(Xdb_[int(freq*self.low_b0[0]/500):int(freq*self.low_b1[0]/500),:],0)
         #y__=minmax_scale(y__, feature_range=(0, 1), axis=0, copy=True)
                 
         y_low=np.convolve(y__,window,mode="same")/np.sum(window)
