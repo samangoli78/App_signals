@@ -20,7 +20,8 @@ class Triple_Extra():
         stiulation=np.abs(stiulation)
         P,dic=find_peaks(stiulation,distance=200,height=0.3*np.max(stiulation))
         diff=[P[i+1]-P[i] for i in np.arange(len(P)-1)]
-        ax.plot(P*0.001,dic["peak_heights"],"x")
+        if ax:
+            ax.plot(P*0.001,dic["peak_heights"],"x")
         diff.append(diff[0]+28) 
         self.stim_start=P
         self.stim_ref=P
@@ -30,11 +31,13 @@ class Triple_Extra():
         P1,dic=find_peaks(ref,distance=500,height=0.5*np.max(refference))
         
         P1=P1
-        ax.plot(P1*0.001,dic["peak_heights"],"x")
+        if ax:
+            ax.plot(P1*0.001,dic["peak_heights"],"x")
         ref=refference[self.stim_start[-1]+self.stim_duration[-1]:]
         PP,dic=find_peaks(ref,distance=500,height=0.5*np.max(refference))
         PP=PP+self.stim_start[-1]+self.stim_duration[-1]
-        ax.plot(PP*0.001,dic["peak_heights"],"x")
+        if ax:
+            ax.plot(PP*0.001,dic["peak_heights"],"x")
         P1=np.hstack([P1,PP])
         self.sinus_ref=P1
         margin

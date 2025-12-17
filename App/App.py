@@ -27,6 +27,7 @@ from .Toplevel import Toplevel as tp
 
 
 class App(tk.Tk):
+    #meta parameters
     apps=[]
     n_fft=[100]
     hop_length=[5]
@@ -142,6 +143,8 @@ class App(tk.Tk):
         self.button_trip=tk.Button(self.frame,text="Switch to Triple Extra Protocol",command=self.triple_protocol)
         self.button_trip.pack(side=tk.LEFT,padx=10)
         self.button_VT=tk.Button(self.frame,text="Switch to VT Protocol",command=self.VT_protocol)
+        self.button_VT.pack(side=tk.LEFT,padx=10)
+        self.button_VT=tk.Button(self.frame,text="compute_all",command=self.compute_all)
         self.button_VT.pack(side=tk.LEFT,padx=10)
         self.button_screen=tk.Button(self.frame,text="screen shot",command=lambda name=None:self.capture_window(name))
         self.button_screen.pack(side=tk.LEFT,padx=10)
@@ -330,7 +333,7 @@ class App(tk.Tk):
                 ax.update(ylim=[ylim[0] * scale_factor, ylim[1] * scale_factor])
                 ax.set()
                 if self.Areas[ax.key]: 
-                    for a in self.Areas[ax.key]:
+                    for a in self.Areas[ax.key].values():
                         a.configure_shade_attr(x=a.x,y=ax.ylim)
                         for lin in a.lines:
                             lin.set_ydata(ax.ylim)
@@ -338,7 +341,7 @@ class App(tk.Tk):
         self.canvas.draw_idle()
         self.update()
 
-    def plot_main(self,ax,x,y2,arg="top",reff=[]):
+    def plot_main(self,ax,x,y2,arg="top",reff=[],plot=True):
         c1={"stim":[]}
         c1["sinus"]=[]
         c1["refs_stim"]=[]
@@ -350,8 +353,13 @@ class App(tk.Tk):
         addition=[["#FFf5F5","High frequency"],            
                     ["#FFc5c5","Low frequency"]]
         ax_object=ax
+        self.Areas[ax_object.key]={}
         ax=ax.ax
-        ax.plot(x,y2,alpha=0.5,linewidth=0.6)
+        if plot:
+            
+            
+            ax.plot(x,y2,alpha=0.5,linewidth=0.6)
+            
         egm=Triple_Extra(t=x,EGM=y2)
         memory=self.delta[self.to_index[self.i][self.j]]
         p_number_mem=None
@@ -364,69 +372,84 @@ class App(tk.Tk):
         car=self.cont[self.i][0]
         p_number=int(car.iat[self.j,car.columns.get_loc('point number')])
         label=car.iat[self.j,car.columns.get_loc("label_color")]
-
+        ax_bot=None
+        if plot:
+            ax_bot=self.axes["bot"].ax
         if len(reff)>0:
-            egm.find_windows(self.axes["bot"].ax,stiulation=reff,refference=butter_bandpass_filter(data=self.cont[self.i][2]["V5"].values,cutoff=[5,180],fs=1000,order=2),margin=0)
+            egm.find_windows(ax_bot,stiulation=reff,refference=butter_bandpass_filter(data=self.cont[self.i][2]["V5"].values,cutoff=[5,180],fs=1000,order=2),margin=0)
         else:
-            egm.find_windows(self.axes["bot"].ax,stiulation=self.cont[self.i][2]["CS1"].values,refference=self.cont[self.i][2]["V5"].values,margin=20)
-            reff=self.cont[self.i][2]["CS1"].values
+            egm.find_windows(ax_bot,stiulation=self.cont[self.i][2]["CS1"].values-self.cont[self.i][2]["CS2"].values,refference=self.cont[self.i][2]["V5"].values,margin=20)
+            reff=self.cont[self.i][2]["CS1"].values-self.cont[self.i][2]["CS2"].values
         
         for ii in range(len(egm.stim_start)):
             detected=False
             A=Area(self,ind=ii)
-            start=egm.stim_start[ii]
-            end=egm.stim_start[ii]+egm.stim_duration[ii]
-            xx=x[start+8:end-10]
-            yy=y2[start+8:end-10]
-            yy1=yy
-            x_Energy,y_low,y_high,y_total=self.Energy(ax,xx,yy,legends=addition)
+            self.Areas[ax_object.key][ii]=A
+            start=egm.stim_start[ii]-400
+            end=egm.stim_start[ii]+100
+            xx=x[start:end]
+            yy=y2[start:end]
+            yy1=yy.copy()
+            
             if memory==0 or self.forcefull:
-                output=find_start(x_Energy,y_low,length=2,ax=None,operation=None,Th=0.15,alpha=self.TH[0])
+                try:
+                    output=find_start(app=self,x_woi=xx,y_woi=yy,length=2,ax=None,operation=None,Th=0.15,alpha=self.TH[0])
+                except Exception as e:
+                    print(e)
+                    output=None
                 if output is not None:
-                    start_n=int(start+8+output[0])
-                    end_n=int(start+8+output[1])
+                    start_n=int(start+output[0])
+                    end_n=int(start+output[1])
                     detected=True
                 else:
-                    start_n=start
-                    end_n=end
-                    reject=True
+                    pass
+
                     
             else:
-                data=memory[2]["stim"][ii]
+                try:
+                    data=memory[2]["stim"][ii]
+                except Exception as e:
+                    print(e)
+
                 
                 
                 if isinstance(data,list) and len(data)==2 and p_number_mem==p_number:
                     start_n,end_n=data
                     detected=True
                 else:
-                    start_n=start
-                    end_n=end
+                    pass
+
                     
 
-            xx=x[start_n:end_n]
-            yy=y2[start_n:end_n]
-            A.add_area(np.array([start_n,end_n]),ylim=ax_object.ylim,xlim=ax_object.xlim,color="green")
-            A.plot_area(ax)
-            self.Areas[arg].append(A)
-            self.canvas.mpl_connect('pick_event', A.clickonline)
-            ax.plot(xx,yy ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
+
 
             if detected:
-                defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n)
-                defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n,inverse=True)
+                xx=x[start_n:end_n]
+                yy1=y2[start_n:end_n]
+                if plot:
+                    A.add_area(np.array([start_n,end_n]),ylim=ax_object.ylim,xlim=ax_object.xlim,color="green")
+                    A.plot_area(ax)
+                    
+                    self.canvas.mpl_connect('pick_event', A.clickonline)
+                    ax.plot(xx,yy1 ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
+                    defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n)
+                    defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n,inverse=True)
+                else:
+                    defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),None,start_n,end_n)
+                    defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),None,start_n,end_n,inverse=True)  
                 c1["refs_stim"].append(egm.stim_ref[ii])
                 c1["stim"].append([start_n,end_n])
                 c1["voltage_stim"].append(yy1.max()-yy1.min())
                 c1["deflection_stim"].append(defl)
             else:
                 c1["refs_stim"].append(egm.stim_ref[ii])
-                c1["stim"].append([start_n,end_n])
-                c1["voltage_stim"].append(yy1.max()-yy1.min())
-                c1["deflection_stim"].append(False)
+                c1["stim"].append(None)
+                c1["voltage_stim"].append(None)
+                c1["deflection_stim"].append(None)
                 
 
             
-        for ii in range(len(egm.sinus_start)):
+        """for ii in range(len(egm.sinus_start)):
             detected=False
             start=egm.sinus_start[ii]
             end=egm.sinus_start[ii]+egm.sinus_duration[ii]
@@ -487,7 +510,7 @@ class App(tk.Tk):
                 c1["refs_sinus"].append(egm.sinus_ref[ii])
                 c1["sinus"].append([start_n,end_n])
                 c1["voltage_sinus"].append(yy1.max()-yy1.min())
-                c1["deflection_sinus"].append(False)
+                c1["deflection_sinus"].append(False)"""
         idx=self.to_index[self.i][self.j]
         if p_number_mem is not None and p_number_mem!=p_number :
             raise ValueError("Mismatch in point number")
@@ -517,13 +540,13 @@ class App(tk.Tk):
         ax_object.set()
         
 
-    def plot(self):
+    def plot(self,plot=True):
         print(self.i,self.j)
         #manual legend ? cleanup; cleaning all canvas that were created in init and then stored in self.ccs as canvases.
         [cc.delete("all") for cc in self.ccs.values()]
 
         # getting key value of my ax class which is up mid as middle or bot as bottom. the purpose of this line of code is to have a new object for shading areas each time we update.
-        self.Areas={i.key:[] for i in self.axes.values()}
+        self.Areas={i.key:{} for i in self.axes.values()}
         
         # load the data
         data_pd=self.cont[self.i][2]
@@ -568,7 +591,7 @@ class App(tk.Tk):
         # check if the protocol is needed
         if self.triple_active:
             ax=axes["top"]
-            self.plot_main(ax,x=x,y2=y2,arg=ax.key,reff=M)
+            self.plot_main(ax,x=x,y2=y2,arg=ax.key,reff=M,plot=plot)
             #ax=axes["mid"]
             #self.plot_main(ax,x=x,y2=y2,arg=ax.key,reff=M)
 
@@ -579,30 +602,30 @@ class App(tk.Tk):
             ax.ax.plot(x,y2,alpha=0.5,linewidth=0.6)
             ax.ax.set_title(car.iat[self.j,car.columns.get_loc("label_color")])
             ax.set()
+        if plot:
+            # plotting refferences
+            ax1_object=axes["bot"]
+            ax1=ax1_object.ax
+
             
-        # plotting refferences
-        ax1_object=axes["bot"]
-        ax1=ax1_object.ax
+            Point_test=find_peaks(V5,0.5)
+            ax1.plot(x,V5,label="V5",alpha=1)
+            #ax1.plot(x,y2,label="y2",alpha=0.7)
+            try:
+                ax1.plot(x,M,label="M",alpha=1)
+            except Exception as e:
+                traceback.print_exc()
+            ax1.grid(True)
+            ax1.scatter(Point_test[0]*0.001,V5[Point_test[0]])
 
-        
-        Point_test=find_peaks(V5,0.5)
-        ax1.plot(x,V5,label="V5",alpha=1)
-        #ax1.plot(x,y2,label="y2",alpha=0.7)
-        try:
-            ax1.plot(x,M,label="M",alpha=1)
-        except Exception as e:
-            traceback.print_exc()
-        ax1.grid(True)
-        ax1.scatter(Point_test[0]*0.001,V5[Point_test[0]])
-
-        #Point_test=find_peaks(M,2)
-        #ax1.scatter(Point_test[0]*0.001,M[Point_test[0]])
-        ax1_object.set()
-        
-        self.create_legend(leg=ax1.get_legend_handles_labels(),canvas=self.ccs[ax1_object.key])
-        #plt.savefig(r"C:\Users\cardio\Desktop\Output case 1 26_7_2024\out_{i}_{x}_{j}.jpeg".format(j=j_,x=cont[i_][1][:-4],i=i_))
-        self.canvas.draw_idle()
-        self.update()
+            #Point_test=find_peaks(M,2)
+            #ax1.scatter(Point_test[0]*0.001,M[Point_test[0]])
+            ax1_object.set()
+            
+            self.create_legend(leg=ax1.get_legend_handles_labels(),canvas=self.ccs[ax1_object.key])
+            #plt.savefig(r"C:\Users\cardio\Desktop\Output case 1 26_7_2024\out_{i}_{x}_{j}.jpeg".format(j=j_,x=cont[i_][1][:-4],i=i_))
+            self.canvas.draw_idle()
+            self.update()
         return True
         
             
@@ -638,24 +661,34 @@ class App(tk.Tk):
 
         self.table.table.refill(row=self.to_index[self.i][self.j])
        
-    def update_plot(self,forcefull=False):
+    def update_plot(self,forcefull=False,plot=True):
         if forcefull:
             self.forcefull=True
         else:
             self.forcefull=False
-        for i in self.axes.values():
-            i.ax.clear()
-        result=self.plot()
+        if plot:
+            for i in self.axes.values():
+                i.ax.clear()
+        print("current index",self.to_index[self.i][self.j])
+        result=self.plot(plot=plot)
         if not result :
+            print(result)
             return
         car:pd.DataFrame  
         car=self.cont[self.i][0]
         self.label.config(text=f"point {car.iat[self.j,car.columns.get_loc('point number')]}")
         self.canvas.draw()
-        print("current index",self.to_index[self.i][self.j])
         self.table.table.go_to(self.to_index[self.i][self.j])
         self.update()
-
+    def compute_all(self):
+        for i in range(len(self.to_i_j)):
+            self.i,self.j=self.to_i_j[i]
+            try:    
+                self.update_plot(forcefull=True,plot=False)
+                self.forcefull=False
+            except Exception as e:
+                print(e)
+                continue
     def p_increase(self,event=None):
         self.direction=1
         if self.j >= len(self.cont[self.i][0])-1:
@@ -750,8 +783,8 @@ class App(tk.Tk):
                 except Exception as e:
                     traceback.print_exc()
                     in_table.append("")
-            print(in_table)
-            print(labels)
+            #print(in_table)
+            #print(labels)
             self.Table["delta"]=pd.Series(in_table)
             self.Table["label_color"]=pd.Series(labels)
 
@@ -785,17 +818,17 @@ class App(tk.Tk):
     def Energy(self,ax,x,y,legends=None):   
         #stft_=librosa.stft(y,n_fft=100,hop_length=1,win_length=35,window="hann",center=True)
         #Xdb_=np.abs(stft_)
-        freqs,time,mags=librosa.reassigned_spectrogram(y,n_fft=int(self.win_length[0])+100,hop_length=int(self.hop_length[0]),win_length=int(self.win_length[0]),window="hann",center=True,sr=1000)
-        print(freqs,time)
+        freqs,time,mags=librosa.reassigned_spectrogram(y,n_fft=int(self.win_length[0]),hop_length=int(self.hop_length[0]),win_length=int(self.win_length[0]),window="hann",center=True,sr=1000)
+        #print(freqs,time)
         time=time.flatten()+x.min()
         freqs=freqs.flatten()
         from scipy.stats import binned_statistic_2d
-        print(x.min(),x.max())
+        #print(x.min(),x.max())
         time_bins = np.linspace(x.min(), x.max(), int((x.max()-x.min())/0.001) + 1)
 
         freq_bins = np.linspace(0, 500, mags.shape[0])
         Xdb_=mags
-        print(time_bins,time)
+        #print(time_bins,time)
         magnitude=np.abs(mags.flatten())
         H_count, _, _, _ = binned_statistic_2d(
             time, freqs, magnitude,
@@ -811,7 +844,7 @@ class App(tk.Tk):
 
 
         Xdb_=H_sum.T
-        print(Xdb_.shape,Xdb_)
+        #print(Xdb_.shape,Xdb_)
         freq=Xdb_.shape[0]
         len_han=int(self.len_hann[0])
         y__=np.mean(Xdb_[freq//5:,:],0)
@@ -841,11 +874,11 @@ class App(tk.Tk):
                 
                 
                 if legends is None:
-                    ax.plot(x,y_low,color="#FFc5c5")
+                    ax.plot(x,y_total,color="#FFc5c5")
                 else:
-                    ax.plot(x,y_low,color=legends[1][0])
-
-        return [x,y_low,y_high,y_total]
+                    ax.plot(x,y_total,color=legends[1][0])
+        x_E=x
+        return x_E,y_low,y_high,y_total
 
 
  
@@ -854,9 +887,11 @@ def deflection(y,ax,start,end,inverse=False):
     if len(signal)!=0:
         indexes=find_peaks(y[start:end],prominence=signal.max()*0.15,height=signal.max()*0.2,distance=5)
         if inverse:
-            ax.scatter((indexes[0]+start)*0.001,-signal[indexes[0]],s=2,color="black")
+            if ax:
+                ax.scatter((indexes[0]+start)*0.001,-signal[indexes[0]],s=2,color="black")
         else:
-            ax.scatter((indexes[0]+start)*0.001,signal[indexes[0]],s=2,color="black")
+            if ax:
+                ax.scatter((indexes[0]+start)*0.001,signal[indexes[0]],s=2,color="black")
     return len(indexes[0])
 
     
