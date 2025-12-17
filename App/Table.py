@@ -1,388 +1,399 @@
-import os
-import numpy as np
 import tkinter as tk
-from tkinter import ttk
-from tkinter import filedialog
+from tkinter import ttk, filedialog
 import pandas as pd
+import numpy as np
 
 
-class TreeView_Edit(ttk.Treeview):
+class EditableTree(ttk.Treeview):
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
 
-    
+        self.defaults: dict[int, list[str]] = {}
 
-    def __init__(self,master,**kwargs):
-        super().__init__(master,**kwargs)
-        self.params={}
-        self.cmds={}
-        self.default=None
-        master:tk.Tk
-        self.params["Enter_func"]=lambda x:print(x,"Enter_func")
-        self.params["select_func"]=lambda x:print(x,"select_func")
-        self.params["refill_func"]=lambda x:print(x,"refill_func")
-        def_func=lambda event:print(event)
-        for f in ["Focus_out_func","Focus_in_func","Enter_func","right_click_func","left_click_func"]:
-            if f not in self.params.keys():
-                self.params.update({f:def_func})
-        super().bind("<Button-3>",self.pop)
-        #super().bind("<Button-1>",self.on_select)
-        super().bind("<Button-2>",self.on_select)
-        #super().bind("<FocusOut>",self.params["Focus_out_func"])
-        super().bind("<Double-Button-1>",self.double_click)
-        #super().bind("<FocusIn>",self.params["Focus_in_func"])
-        self.temp=None
-        def cmd(event):
-            if self.temp is None:
-                return
-            txt=f"{event},child:,{self.get_children()},focus_displayof:{self.focus_displayof()},focus_force:{self.focus_force()}"
-            txt+=f"identify_row:{self.identify_row(event.y)},identify_column:{self.identify_column(event.x)},identify_region:{self.identify_region(event.x,event.y)},identify_element:{self.identify_element(event.x,event.y)}"
-            try:
-                self.lab.configure(text=txt)
-            except:
-                self.lab=tk.Label(self.temp,text=txt,wraplength=self.temp.winfo_width())
-                self.lab.pack()
-        self.cmds["motion"]=cmd
+        self.on_cell_move = lambda ctx: None
+        self.on_edit_commit = lambda ctx: None
+        self.on_select_row = lambda ctx: None
 
-        super().bind("<Motion>",self.cmds["motion"])
-        #super().bind("<Double-Button-1>",self.double_click)
-        self.master=master
-         
-    def double_click(self,event):
-        #self.params["refill_func"]([self.get_children().index(self.identify_row(event.y))])
-        self.params["select_func"]([self.get_children().index(self.identify_row(event.y))])
-        self.refill(event)
-        """if self.identify_region(event.x,event.y)=="separator":
-            [self.column(column=col,width=40) for col in self["columns"]]"""
-    def pop(self,event):
-        menu=tk.Menu(self.master,tearoff=False)
-        menu.add_command( label="Change",command=lambda event=event:self.refill(event))
-        menu.add_command(label="Save",command=self.save)
-        def cmd():
-            self.temp=tk.Toplevel()
-            self.temp.geometry("200x200")
-        self.cmds["top_level"]=cmd
-        menu.add_command(label="info",command=self.cmds["top_level"])
-        menu.add_separator()
-        menu.add_command(label="Exit",command=menu.destroy)
-        menu.tk_popup(event.x_root,event.y_root)
-      
+        self.cur_iid: str | None = None
+        self.cur_col: int = 0
 
-    def on_enter(self,event,col:str,ID:str,func):
+        self._edit_entry: tk.Entry | None = None
 
-        # get the data inside the entry
-        if isinstance(event, tk.Event):
-            wiget=event.widget
-            print("enter executed from pushing enter")
-            
-        else:
-            wiget=event
-            print("enter executed after special selecting dropdown")
+        # row highlight tags
+        self.tag_configure("active_row", background="#E8F0FE")
+        self.tag_configure("changed", background="#A5A5A5")
 
-        new_text=wiget.get()
-        # using ID to access the current value in the selected row
-        
-        selected_values=self.item(ID).get("values")
-        
-        # using col to access the desired cell in the selected row
-        
-        selected_values[col]=new_text
-        
-        # you can assign new value to the table with table.item method identifying the ID and value, optionally if you want to change the tag you need to specify "changed color" place holder first.
-        
-        self.item(ID,values=selected_values,tags='changed_tag')
-        
-        # then you can assign the desired color to the " changed color" place holder that you just assigned.
-        
-        self.tag_configure("changed_tag",background="#A5A5A5")
-        
-        # dont forget to destroy the entry widget.
-        
-        wiget.destroy()
-        #self.get_children().index(ID) is row number
-        self.params["Enter_func"]([self.get_children().index(ID),col,new_text])
+        # bindings
+        self.bind("<Button-1>", self._ev_click_select, add="+")
+        self.bind("<Double-Button-1>", self._ev_double_click, add="+")
+        self.bind("<Button-3>", self._ev_popup, add="+")
 
-    def on_select(self,event):
-        
-        # on calling "select" the data of the selected cell will be generated and returned
-        
-        out=self.find(event)
-        self.params["select_func"]([self.get_children().index(self.identify_row(event.y))])
-        return out
-    
-    def add_data(self,data,row,col):
-        ID=self.get_children()[row]
-        data_T=self.item(ID).get("values")
-        data_T[col]=data
-        self.item(ID,values=data_T,tags="new")
-        
-    def set_default(self,dif:list[list]):
+        self.bind("<Up>", self._ev_nav_ud, add="+")
+        self.bind("<Down>", self._ev_nav_ud, add="+")
 
-        self.default=dif
-    
+        self.bind("<Left>", self._ev_nav_lr, add="+")
+        self.bind("<Right>", self._ev_nav_lr, add="+")
 
+        self.bind("<Return>", self._ev_enter, add="+")
+        self.bind("<Escape>", self._ev_escape, add="+")
 
-    def bind(self,identifier:str,func):
-        
-        # change the binding function of "select" event to a custom function, designed for better customizing the module for external usrsers
-        if identifier=="<Button-1>":
-            self.params["select_func"]=func
-        elif identifier=="<Return>":
-            self.params["Enter_func"]=func
-        elif identifier=="<Double-Button-1>":
-            self.params["refill_func"]=func
-        elif identifier=="<Button-2>":
-            self.params["select_func"]=func
-    
-        
-    
+    # ---------------------------
+    # Helpers
+    # ---------------------------
 
-    def find(self,event):
-        
-        # to see if it is in cell or heading or text
-        
-        selected_region=self.identify_region(event.x,event.y)
-        
-        # finding column in string = "#$$"
-        
-        selected_column=self.identify_column(event.x)
-        
-        # finding the ID where the mouse is on_row
-        
-        selected_ID=self.identify_row(event.y)
-        
-        # to check if they are all valid
-        
-        if selected_column and selected_ID and selected_region=="cell":
-        
-            #geting the value of a row based on its ID
-        
-            data=self.item(selected_ID).get("values")
-        
-            #except the first char "#" others identify the column and it starts from 1
-        
-            col=int(selected_column[1:])-1
-        
-            #the first element indicates the index as we identified a certain column for indexes at the begining on the input table
-        
-            row=data[0]
-        
-            return row,col,data 
-        
-        else:
-        
+    def _ensure_current_cell(self):
+        kids = self.get_children()
+        if not kids:
+            self.cur_iid = None
+            return
+
+        if self.cur_iid in kids:
+            return
+
+        sel = self.selection()
+        if sel and sel[0] in kids:
+            self.cur_iid = sel[0]
+            return
+
+        self.cur_iid = kids[0]
+        self.selection_set(self.cur_iid)
+        self.focus(self.cur_iid)
+
+    def _row_index_from_iid(self, iid: str) -> int | None:
+        try:
+            return self.get_children().index(iid)
+        except ValueError:
             return None
 
+    def _col_count(self) -> int:
+        return len(self["columns"])
 
-    def refill(self,event=None,row=None):
-        
-        if event is not None:
-            selected_ID=self.identify_row(event.y)
-            out=self.find(event)
-        elif row is not None:
+    def _get_values(self, iid: str) -> list:
+        return list(self.item(iid).get("values") or [])
+
+    def _bbox_of(self, iid: str, col: int):
+        if iid is None or col is None:
+            return None
+        if col < 0 or col >= self._col_count():
+            return None
+        bbox = self.bbox(iid, self["columns"][col])
+        return bbox if bbox else None
+
+    def _cell_ctx(self, key: str):
+        self._ensure_current_cell()
+        iid = self.cur_iid
+        col = self.cur_col
+        row = self._row_index_from_iid(iid) if iid else None
+        values = self._get_values(iid) if iid else None
+        cell_value = None
+        if values is not None and 0 <= col < len(values):
+            cell_value = values[col]
+        return {
+            "key": key,
+            "iid": iid,
+            "row": row,
+            "col": col,
+            "values": values,
+            "cell_value": cell_value,
+        }
+
+    def _set_active_row_tag(self):
+        # clear tag from all rows (cheap enough for moderate sizes)
+        for iid in self.get_children():
+            tags = tuple(t for t in (self.item(iid).get("tags") or ()) if t != "active_row")
+            self.item(iid, tags=tags)
+
+        if self.cur_iid:
+            tags = set(self.item(self.cur_iid).get("tags") or ())
+            tags.add("active_row")
+            self.item(self.cur_iid, tags=tuple(tags))
+
+    # ---------------------------
+    # Editor lifecycle
+    # ---------------------------
+
+    def close_editor(self):
+        if self._edit_entry is not None:
             try:
-                
-                selected_ID=f"row{row}"
-                out=[row,self.col,self.item(selected_ID).get("values")]
-            except Exception as e:
-                print(e)
-                return
-        else:
+                self._edit_entry.destroy()
+                self.focus_set()
+            except Exception:
+                pass
+            self._edit_entry = None
+
+    def edit_current_cell(self):
+        self._ensure_current_cell()
+        iid, col = self.cur_iid, self.cur_col
+        bbox = self._bbox_of(iid, col)
+        if not bbox:
             return
-        
 
-        
+        self.close_editor()
 
-        if out is not None:
-            # select
-      
-            self.selection_set(selected_ID)
-      
-            # focus
-      
-            self.focus(selected_ID)
-            # accessing only column and data outputs of the self.find() method
+        x, y, w, h = bbox
+        vals = self._get_values(iid)
+        if col < 0 or col >= len(vals):
+            return
 
-            col,data=out[1:]
-            self.col=col
-            # getting the coordinate of the cell in the frame 
+        entry = tk.Entry(self.master)
+        entry.place(x=x, y=y, width=w, height=h)
+        entry.insert(0, vals[col])
+        entry.select_range(0, tk.END)
+        entry.focus_set()
 
-            coord=self.bbox(selected_ID,self["columns"][col])
+        # destroy editor on focus out
+        entry.bind("<FocusOut>", lambda e: self.close_editor(), add="+")
+        entry.bind("<Escape>", lambda e: (self.close_editor(), self.focus_force()), add="+")
+        entry.bind("<Up>",   lambda event:self.close_editor(), add="+")
+        entry.bind("<Down>",lambda event:self.close_editor(), add="+")
 
-            entry_edit=tk.Entry(self.master)
+        self._edit_entry = entry
 
-            # putting an entry widget right on the coordinate with the same size
+        def commit(value: str):
+            vals2 = self._get_values(iid)
+            if 0 <= col < len(vals2):
+                vals2[col] = value
+                # keep any existing tags, add "changed"
+                tags = set(self.item(iid).get("tags") or ())
+                tags.add("changed")
+                self.item(iid, values=vals2, tags=tuple(tags))
+                self.on_edit_commit({
+                    "iid": iid,
+                    "row": self._row_index_from_iid(iid),
+                    "col": col,
+                    "value": value,
+                    "values": vals2,
+                })
 
-            entry_edit.place(x=coord[0],y=coord[1],width=coord[2],height=coord[3])
-            # selecting all in entry widget
+        # dropdown defaults (optional)
+        if col in self.defaults and self.defaults[col]:
+            menu = tk.Menu(self.master, tearoff=False)
 
-            entry_edit.select_range(0,tk.END)
+            def close_menu(event=None):
+                try:
+                    menu.unpost()
+                except Exception:
+                    pass
+                try:
+                    menu.destroy()
+                except Exception:
+                    pass
+                self.focus_force()
+                self.close_editor()  # cancel edit when leaving dropdown
 
-            # insert the same cell data to the entry widget
+            def pick(item):
+                commit(item)
+                close_menu()
 
-            entry_edit.insert(0,data[col])
+            for item in self.defaults[col]:
+                menu.add_command(label=item, command=lambda it=item: pick(it))
 
-            # focus on the entry widget 
+            menu.bind("<Escape>", close_menu)
 
-            entry_edit.focus_set()
-            menu=tk.Menu(self.master,tearoff=False)
+            sx = self.winfo_rootx() + x
+            sy = self.winfo_rooty() + y + h
+            menu.tk_popup(sx, sy)
 
-            def cmd(item):
-                entry_edit.delete(0,tk.END)
-                entry_edit.insert(0,item)
-                self.on_enter(entry_edit,col,selected_ID,func=self.params["Enter_func"])
+        entry.bind("<Return>", lambda e: (commit(entry.get()), self.close_editor(), self.focus_force()), add="+")
 
-            if self.default:
-                for r in self.default:
-                    if col==r[0]:
-                        for item in r[1:]:
-                            menu.add_command(label=item,command=lambda item=item:cmd(item))
-                        tree_x = self.winfo_rootx()
-                        tree_y = self.winfo_rooty()
-                        x = tree_x + coord[0]
-                        y = tree_y + coord[1]+coord[3]
-                        menu.tk_popup(x=x,y=y)
-                        entry_edit.focus_set()
+    # ---------------------------
+    # Events
+    # ---------------------------
 
-                    
+    def _ev_escape(self, event):
+        self.close_editor()
+        self.focus_force()
+        return None
 
-            entry_edit.bind("<FocusOut>",lambda event: event.widget.destroy())
-            #menu.bind("<FocusOut>",lambda event: event.widget.destroy())
+    def _ev_click_select(self, event):
+        def after():
+            sel = self.selection()
+            if sel:
+                self.cur_iid = sel[0]
+            self._set_active_row_tag()
+            self.on_select_row(self._cell_ctx("Click"))
+        self.after_idle(after)
 
-            # bind enter, to be able to save entry data to the selected cell and then destroy the entry widget
+    def _ev_double_click(self, event):
+        if self.identify_region(event.x, event.y) == "cell":
+            iid = self.identify_row(event.y)
+            col_str = self.identify_column(event.x)
+            if iid and col_str.startswith("#"):
+                self.cur_iid = iid
+                self.cur_col = int(col_str[1:]) - 1
+                self.selection_set(iid)
+                self.focus(iid)
+                self._set_active_row_tag()
+                self.edit_current_cell()
+        return None
 
-            entry_edit.bind("<Return>",lambda event,selected_column=col,selected_ID=selected_ID
-                            :self.on_enter(event,selected_column,selected_ID,func=self.params["Enter_func"]))
-            
-    def go_to(self,row):
-      
-        # when you have the row, you can easilly find the ID by geting chidren method and choosing the right index
-      
-        ID=self.get_children()[row]
-      
-        # see
-      
-        self.see(ID)
-      
-        # select
-      
-        self.selection_set(ID)
-      
-        # focus
-      
-        self.focus(ID)
+    def _ev_nav_ud(self, event):
+        if event.widget.focus_get() is not event.widget:
+            return None
 
-    def extract_data(self):
-        row_ids=self.get_children()
-        out=[self["columns"]]
-        for id in row_ids:
-            out.append(self.item(id).get("values"))
-        return out
-    
-    def save(self):
-        file=filedialog.asksaveasfilename(confirmoverwrite=True,filetypes=(
-        ("Text files", "*.txt"),
-        ("excel", ("*.csv", "*.xml")),
-        ("All Files", "*.*")))
-        out=self.extract_data()
-        if file is not None:
-  
-            format=file.split("/")[-1].split(".")[-1]
-  
-            if format=="txt":
-                with open(file,"w") as file:
-                    file.writelines([";".join([str(item) for item in line]+["\n"]) for line in out])
-            elif format=="csv":
-                pd.DataFrame(out[1:],columns=out[0]).to_csv(file,index=False)
-            else:
-                pd.DataFrame(out[1:],columns=out[0]).to_csv(file,index=False)
-                print("format not indicated and the table was saved as csv file")
-            
+        self.close_editor()
 
-            
-    
+        def after():
+            sel = self.selection()
+            if sel:
+                self.cur_iid = sel[0]
+            self._set_active_row_tag()
+            ctx = self._cell_ctx(event.keysym)
+            self.on_cell_move(ctx)
 
+        self.after_idle(after)
+        return None  # keep Treeview native Up/Down
 
+    def _ev_nav_lr(self, event):
+        if event.widget.focus_get() is not event.widget:
+            return None
 
+        self.close_editor()
+        self._ensure_current_cell()
 
+        if event.keysym == "Left":
+            self.cur_col = max(0, self.cur_col - 1)
+        else:
+            self.cur_col = min(self._col_count() - 1, self.cur_col + 1)
 
-class Table:
-    def __init__(self,master,table:pd.DataFrame):
-   
-        # gettimg a root for the table it could be a tk.Tk or tk.Frame
-   
-        self.master=master
-        self.master: tk.Tk
+        ctx = self._cell_ctx(event.keysym)
+        self.on_cell_move(ctx)
+        return "break"  # stop horizontal scrolling
 
-   
-        # make a frame for the treeviewedit object
-   
-        self.tree_frame = tk.Frame(self.master, width=500, height=200)
-   
-        # making the desired scroll bars vertically and horizontally
-   
-        self.h_scroll = ttk.Scrollbar(self.master, orient="horizontal")
-        self.v_scroll = ttk.Scrollbar(self.master, orient="vertical")
-        
-        # listing the columns of the input table
-        
-        cols=table.columns.tolist()
-        
-        # adding an index column
-        
-        cols.insert(0,"index")
-        self.table=TreeView_Edit(self.tree_frame,columns=cols,selectmode=tk.BROWSE,
-                                show="headings",xscrollcommand=self.h_scroll.set,
-                                yscrollcommand=self.v_scroll.set)
-        
-        # binding scroll bars with their commands
-        
-        self.h_scroll.config(command=self.table.xview)
-        self.v_scroll.config(command=self.table.yview)
-        
-        # assign heading to the columns
-        
-        [self.table.heading(val,text=val) for i,val in enumerate(cols)]
-        
-        # insert values of the table in addition to the first column that involve indexes
-        
-        [self.table.insert(parent="",index=tk.END,iid=f"row{i}",values=np.insert(value,0,i).tolist()) for i,value in enumerate(table.values)]
-        
-        # configuring columns format 
-        
-        [self.table.column(column=val,stretch=tk.YES,minwidth=30,width=60,anchor="center") for i,val in enumerate(cols)]
-        
-        # ?
-        
-        self.master.grid_rowconfigure(1, weight=1)
-        self.master.grid_columnconfigure(0, weight=1)
-        
-        # packing table in tree frame
-        
-        self.table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # placing tree frame
-        
-        self.tree_frame.grid(row=1,column=0,sticky=tk.NSEW)
-        self.tree_frame.grid_propagate(False)
-        
-        #placing scroll bars
-        
-        self.v_scroll.grid(row=1,column=1,sticky=tk.NS)
-        self.h_scroll.grid(row=2,column=0,sticky=tk.EW )
-        #tk.Button(self.master,command=self.table.save).grid(column=0,row=3)
+    def _ev_enter(self, event):
+        if event.widget.focus_get() is not event.widget:
+            return None
+        self.close_editor()
+        ctx = self._cell_ctx("Return")
+        self.on_cell_move(ctx)
+        self.edit_current_cell()
+        return "break"
+
+    def _ev_popup(self, event):
+        iid = self.identify_row(event.y)
+        if iid:
+            self.selection_set(iid)
+            self.focus(iid)
+            self.cur_iid = iid
+            self._set_active_row_tag()
+
+        menu = tk.Menu(self.master, tearoff=False)
+
+        def close_menu(event=None):
+            try:
+                menu.unpost()
+            except Exception:
+                pass
+            try:
+                menu.destroy()
+            except Exception:
+                pass
+            self.focus_force()
+
+        def edit_here():
+            if self.identify_region(event.x, event.y) == "cell":
+                col_str = self.identify_column(event.x)
+                if col_str.startswith("#"):
+                    self.cur_col = int(col_str[1:]) - 1
+            self.edit_current_cell()
+            close_menu()
+
+        menu.add_command(label="Edit cell", command=edit_here)
+        menu.add_command(label="Save", command=self.save_to_file)
+        menu.add_separator()
+        menu.add_command(label="Close", command=close_menu)
+        menu.bind("<Escape>", close_menu)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    # ---------------------------
+    # Save / export
+    # ---------------------------
+
+    def save_to_file(self):
+        file = filedialog.asksaveasfilename(
+            confirmoverwrite=True,
+            defaultextension=".csv",
+            filetypes=(("CSV", "*.csv"), ("Text", "*.txt"), ("All Files", "*.*")),
+        )
+        if not file:
+            return
+
+        cols = list(self["columns"])
+        rows = [self._get_values(iid) for iid in self.get_children()]
+        ext = file.split(".")[-1].lower()
+
+        if ext == "txt":
+            with open(file, "w", encoding="utf-8") as f:
+                f.write(";".join(map(str, cols)) + "\n")
+                for r in rows:
+                    f.write(";".join(map(str, r)) + "\n")
+        else:
+            pd.DataFrame(rows, columns=cols).to_csv(file, index=False)
 
 
+class TableWidget(tk.Frame):
+    def __init__(self, master, df: pd.DataFrame):
+        super().__init__(master)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        cols = ["index"] + list(df.columns)
+
+        self.tree = EditableTree(self, columns=cols, show="headings", selectmode="browse")
+
+        for c in cols:
+            self.tree.heading(c, text=str(c))
+            self.tree.column(c, width=90, minwidth=50, anchor="center", stretch=True)
+
+        for i, row in enumerate(df.values):
+            self.tree.insert("", "end", iid=f"row{i}", values=[i] + list(row))
+
+        vs = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        hs = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        hs.grid(row=1, column=0, sticky="ew")
 
 
-if __name__=="__main__":
-    #carto=Carto(r"F:/New_Case_3Extra")
-    #print(carto.path)
-    table:pd.DataFrame = None
-    #table=carto.car_extract()
-    #print(table)
-    root=tk.Tk()
-    table=pd.DataFrame(np.zeros((4,4)),columns=[i for i in range(4)])
-    table=Table(root,table)
-    table.table.set_default([[2,"kdfjlvhsa","lsdfvhdls","slsdfhsdlhj","zfhsalh"]])
-    #print(table.h_scroll)
-    table.table.go_to(2 )
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.title("EditableTree demo (visible table)")
+    root.geometry("900x380")
+
+    df = pd.DataFrame(
+        np.random.randint(0, 100, (12, 6)),
+        columns=["A", "B", "C", "D", "E", "F"],
+    )
+
+    table = TableWidget(root, df)
+    table.pack(fill="both", expand=True, padx=8, pady=8)
+
+    tv = table.tree
+    tv.defaults = {3: ["LOW", "MEDIUM", "HIGH"]}  # col=3 is "C" (index,A,B,C)
+
+    def on_move(ctx):
+        print(f"[MOVE] {ctx['key']} row={ctx['row']} col={ctx['col']} value={ctx['cell_value']}")
+
+    def on_commit(ctx):
+        print(f"[COMMIT] row={ctx['row']} col={ctx['col']} value={ctx['value']}")
+
+    def on_select(ctx):
+        print(f"[SELECT] row={ctx['row']} col={ctx['col']}")
+
+    tv.on_cell_move = on_move
+    tv.on_edit_commit = on_commit
+    tv.on_select_row = on_select
+
+    # initial state
+    tv.focus_set()
+    kids = tv.get_children()
+    if kids:
+        tv.selection_set(kids[0])
+        tv.focus(kids[0])
+        tv.cur_iid = kids[0]
+        tv.cur_col = 1  # start on column "A"
+        tv._set_active_row_tag()
+
     root.mainloop()

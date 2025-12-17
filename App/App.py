@@ -18,7 +18,7 @@ import traceback
 # private libs
 from .Triple_Extra import Triple_Extra
 from .Signals import find_start,butter_bandpass_filter
-from .Table import Table
+from .Table import TableWidget
 from .CARTO_Tool import Carto
 from .Area import Area
 from .Ax import ax
@@ -153,9 +153,11 @@ class App(tk.Tk):
         self.frame3=tk.Frame(self)
         self.panned_window.add(self.frame3,weight=1)
         #self.frame3.pack(expand=True,fill="both")
-        self.table=Table(self.frame3,self.Table)
-        self.table.table.set_default([[1,"Reject","POS","NEG"]])
+        self.table=TableWidget(self.frame3,self.Table)
+        self.table.pack(fill="both", expand=True)           # IMPORTANT: it's a Frame now
+        tv = self.table.tree                               # the EditableTree instance
 
+        tv.defaults = {1: ["Reject", "POS", "NEG"]}         # column index for label_color in YOUR table
         self.frame1=tk.Frame(self,pady=5,background="white")
         self.panned_window.add(self.frame1,weight=2)
         self.set_figure()
@@ -239,15 +241,39 @@ class App(tk.Tk):
         self.canvas.mpl_connect("key_press_event",mpl_arrow) 
         self.canvas.mpl_connect("button_press_event", self.on_right_click) 
         self.canvas.mpl_connect("button_release_event", self.on_right_release)
-        self.table.table.bind("<Button-2>",self.select)
-        self.table.table.bind("<Return>",self.on_enter)
-        #self.table.table.bind("<Double-Button-1>",self.select)
+        tv = self.table.tree
+
+        # row selection (mouse click / Up/Down changes selection)
+        tv.on_select_row = lambda ctx: self._table_select_ctx(ctx)
+
+        # cell move (Up/Down/Left/Right/Enter triggers this hook)
+        tv.on_cell_move = lambda ctx: self._table_move_ctx(ctx)
+
+        # edit committed (Return, dropdown pick, focus-out if you set it to commit)
+        tv.on_edit_commit = lambda ctx: self._table_commit_ctx(ctx)
         
         self.canvas.mpl_connect("scroll_event", self.on_scroll)
         super().protocol("WM_DELETE_WINDOW", self.quit)
         # Create the figure and axis objects
 
+    def _table_select_ctx(self, ctx):
+        # ctx["row"] is the table row index
+        if ctx["row"] is None:
+            return
+        self.select([ctx["row"]])  # reuse your existing select(event) which expects [row]
 
+    def _table_move_ctx(self, ctx):
+        # You want Up/Down to navigate points in your plot:
+        if ctx["key"] == "Up":
+            self.p_decrease()   # Up should go to previous (your original mapping was inverted)
+        elif ctx["key"] == "Down":
+            self.p_increase()
+
+    def _table_commit_ctx(self, ctx):
+        # ctx has: row, col, value
+        if ctx["row"] is None:
+            return
+        self.on_enter([ctx["row"], ctx["col"], ctx["value"]])  # reuse your existing on_enter(event)
     def quit(self):
         self.is_running = False
         super().quit()
@@ -385,12 +411,13 @@ class App(tk.Tk):
             detected=False
             A=Area(self,ind=ii)
             self.Areas[ax_object.key][ii]=A
-            start=egm.stim_start[ii]-400
-            end=egm.stim_start[ii]+100
+            # choose the preset 
+            #start=egm.stim_start[ii]-400
+            start=egm.stim_start[ii]+6
+            end=egm.stim_start[ii]+200
             xx=x[start:end]
             yy=y2[start:end]
             yy1=yy.copy()
-            
             if memory==0 or self.forcefull:
                 try:
                     output=find_start(app=self,x_woi=xx,y_woi=yy,length=2,ax=None,operation=None,Th=0.15,alpha=self.TH[0])
@@ -522,8 +549,18 @@ class App(tk.Tk):
         else:
             final_label=label
         self.delta[idx] = [str(p_number), final_label, c1]       
-        self.table.table.add_data(", ".join([f"{key}: {', '.join([str(ii) for ii in value])}" for key,value in c1.items() if "voltage" not in key]),
-                                               self.to_index[self.i][self.j],-1)
+        tv = self.table.tree  # EditableTree
+        row = self.to_index[self.i][self.j]
+        iid = f"row{row}"
+
+        vals = list(tv.item(iid)["values"])
+        vals[-1] = ", ".join(
+            f"{k}: {', '.join(map(str, v))}"
+            for k, v in c1.items()
+            if "voltage" not in k
+        )
+        tv.item(iid, values=vals)
+
         
                 
 
@@ -654,7 +691,11 @@ class App(tk.Tk):
             print(e, "reached end of the table")
             traceback.print_exc()
             i,j=0,0
-        self.table.table.go_to(self.to_index[i][j])
+        self.table.tree.see(f"row{self.to_index[i][j]}")
+        self.table.tree.selection_set(f"row{self.to_index[i][j]}")
+        self.table.tree.focus(f"row{self.to_index[i][j]}")
+        self.table.tree.cur_iid = f"row{self.to_index[i][j]}"
+
         self.i=i
         self.j=j
         self.update_plot()
@@ -678,7 +719,11 @@ class App(tk.Tk):
         car=self.cont[self.i][0]
         self.label.config(text=f"point {car.iat[self.j,car.columns.get_loc('point number')]}")
         self.canvas.draw()
-        self.table.table.go_to(self.to_index[self.i][self.j])
+        self.table.tree.see(f"row{self.to_index[self.i][self.j]}")
+        self.table.tree.selection_set(f"row{self.to_index[self.i][self.j]}")
+        self.table.tree.focus(f"row{self.to_index[self.i][self.j]}")
+        self.table.tree.cur_iid = f"row{self.to_index[self.i][self.j]}"
+
         self.update()
     def compute_all(self):
         for i in range(len(self.to_i_j)):
@@ -791,8 +836,11 @@ class App(tk.Tk):
             del self.table
             self.table=Table(self.frame3,self.Table)
             self.table.table.set_default([[1,"Reject","POS","NEG"]])
-            self.table.table.bind("<Button-1>",self.select)
-            self.table.table.bind("<Return>",self.on_enter)
+            self.table.table.bind_native("<Button-1>",self.select)
+            self.table.table.bind_native("<Return>",self.on_enter)
+            self.table.table.bind("<Up>")
+            self.table.table.bind("<Up>", self._on_key_nav, add="+")
+            self.table.table.bind("<Down>", self._on_key_nav, add="+")
         def _toplevel():
             top_window=tk.Toplevel()
             top_window.attributes("-topmost", True)
