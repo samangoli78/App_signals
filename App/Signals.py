@@ -97,7 +97,7 @@ from scipy.ndimage import gaussian_filter1d, binary_closing, label
 from scipy.interpolate import interp1d
 
 def find_start(app:App, x_woi, y_woi, length=7, ax=None, operation="min",
-               Th=0.2, alpha=0.5, close_width=15, pad=10,
+               Th=0.1, alpha=0.5, close_width=15, pad=10,
                top_k_longest=3, min_seg_len=5):
     """
     - Detect chunks above threshold (after closing)
@@ -111,7 +111,7 @@ def find_start(app:App, x_woi, y_woi, length=7, ax=None, operation="min",
     # Smooth + adaptive threshold
     y_smooth = gaussian_filter1d(y_total, sigma=2)
     Th = otsu_threshold(y_smooth, alpha=alpha)
-
+    #y_smooth=y_low
     # Interpolate onto uniform grid
     N = len(y_smooth)
     xs = np.linspace(np.min(x_E), np.max(x_E), N)
@@ -123,13 +123,18 @@ def find_start(app:App, x_woi, y_woi, length=7, ax=None, operation="min",
     total_i = _interp(y_smooth)   # use smoothed total for segmentation
     low_i   = _interp(y_low)
     high_i  = _interp(y_high)
-
     # Pad for morphology (keep stats arrays edge-padded to avoid artificial zeros)
     total_p = np.pad(total_i, (pad, pad), mode="constant", constant_values=0.0)
-    low_p   = np.pad(low_i,   (pad, pad), mode="edge")
-    high_p  = np.pad(high_i,  (pad, pad), mode="edge")
+    low_p   = np.pad(low_i,   (pad, pad), mode="constant", constant_values=0.0)
+    high_p  = np.pad(high_i,  (pad, pad),  mode="constant", constant_values=0.0)
 
     # Threshold + closing
+    min_val=total_p.min()
+    print(min_val)
+    range_value=total_p.max()-min_val
+    #Th=Th*range_value+min_val
+    
+    
     binary = total_p > Th
     closed = binary_closing(binary, structure=np.ones(close_width, dtype=bool))
 

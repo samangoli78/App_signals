@@ -1,0 +1,608 @@
+# tk_gl_shader_pick_sphere.py
+# pip install PyOpenGL PyOpenGL_accelerate pyopengltk numpy
+
+import math
+import tkinter as tk
+import numpy as np
+from pyopengltk import OpenGLFrame
+from OpenGL import GL
+
+# ----------------- small math helpers (numpy) -----------------
+
+def clamp(x, lo, hi):
+    return lo if x < lo else hi if x > hi else x
+
+def normalize(v):
+    n = np.linalg.norm(v)
+    if n < 1e-12:
+        return v
+    return v / n
+
+def look_at(eye, center, up):
+    eye = np.asarray(eye, dtype=np.float32)
+    center = np.asarray(center, dtype=np.float32)
+    up = np.asarray(up, dtype=np.float32)
+
+    f = normalize(center - eye)
+    s = normalize(np.cross(f, up))
+    u = np.cross(s, f)
+
+    M = np.eye(4, dtype=np.float32)
+    M[0, :3] = s
+    M[1, :3] = u
+    M[2, :3] = -f
+    M[:3, 3] = -M[:3, :3] @ eye
+    return M
+
+def perspective(fovy_deg, aspect, znear, zfar):
+    fovy = math.radians(fovy_deg)
+    f = 1.0 / math.tan(fovy / 2.0)
+
+    M = np.zeros((4, 4), dtype=np.float32)
+    M[0, 0] = f / aspect
+    M[1, 1] = f
+    M[2, 2] = (zfar + znear) / (znear - zfar)
+    M[2, 3] = (2.0 * zfar * znear) / (znear - zfar)
+    M[3, 2] = -1.0
+    return M
+
+# ----------------- shaders -----------------
+
+BEAUTY_VS = r"""
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNor;
+
+uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform mat3 uNormalMat;
+
+out vec3 vPosW;
+out vec3 vNorW;
+
+void main(){
+    vec4 pw = uModel * vec4(aPos, 1.0);
+    vPosW = pw.xyz;
+    vNorW = normalize(uNormalMat * aNor);
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+"""
+
+BEAUTY_FS = r"""
+#version 330 core
+in vec3 vPosW;
+in vec3 vNorW;
+
+uniform vec3 uEyeW;
+uniform vec3 uLightW;
+
+out vec4 FragColor;
+
+void main(){
+    vec3 N = normalize(vNorW);
+    vec3 L = normalize(uLightW - vPosW);
+    vec3 V = normalize(uEyeW - vPosW);
+    vec3 H = normalize(L + V);
+
+    float diff = max(dot(N, L), 0.0);
+    float spec = pow(max(dot(N, H), 0.0), 64.0);
+
+    vec3 base = vec3(0.70, 0.85, 1.00);
+    vec3 ambient = 0.12 * base;
+    vec3 color = ambient + diff * base + 0.35 * spec * vec3(1.0);
+
+    FragColor = vec4(color, 1.0);
+}
+"""
+
+PICK_VS = r"""
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=2) in vec3 aBary;     // (1,0,0) (0,1,0) (0,0,1)
+layout(location=3) in uint aFaceId;   // triangle id
+
+uniform mat4 uMVP;
+
+out vec3 vBary;
+flat out uint vFaceId;
+
+void main(){
+    vBary = aBary;
+    vFaceId = aFaceId;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+"""
+
+PICK_FS = r"""
+#version 330 core
+in vec3 vBary;
+flat in uint vFaceId;
+
+uniform uint uObjectId;
+
+layout(location=0) out uint outObj;
+layout(location=1) out uint outFace;
+layout(location=2) out vec2 outBary; // store bary.x, bary.y ; bary.z = 1-x-y
+
+void main(){
+    outObj = uObjectId;
+    outFace = vFaceId;
+    outBary = vBary.xy;
+}
+"""
+
+# ----------------- GL utilities -----------------
+
+def compile_shader(src, shader_type):
+    sh = GL.glCreateShader(shader_type)
+    GL.glShaderSource(sh, src)
+    GL.glCompileShader(sh)
+    ok = GL.glGetShaderiv(sh, GL.GL_COMPILE_STATUS)
+    if not ok:
+        log = GL.glGetShaderInfoLog(sh).decode("utf-8", errors="replace")
+        raise RuntimeError(f"Shader compile failed:\n{log}")
+    return sh
+
+def link_program(vs_src, fs_src):
+    vs = compile_shader(vs_src, GL.GL_VERTEX_SHADER)
+    fs = compile_shader(fs_src, GL.GL_FRAGMENT_SHADER)
+    prog = GL.glCreateProgram()
+    GL.glAttachShader(prog, vs)
+    GL.glAttachShader(prog, fs)
+    GL.glLinkProgram(prog)
+    ok = GL.glGetProgramiv(prog, GL.GL_LINK_STATUS)
+    if not ok:
+        log = GL.glGetProgramInfoLog(prog).decode("utf-8", errors="replace")
+        raise RuntimeError(f"Program link failed:\n{log}")
+    GL.glDeleteShader(vs)
+    GL.glDeleteShader(fs)
+    return prog
+
+def set_uniform_mat4(prog, name, mat4):
+    loc = GL.glGetUniformLocation(prog, name)
+    GL.glUniformMatrix4fv(loc, 1, GL.GL_TRUE, mat4)  # GL_TRUE because numpy is row-major
+
+def set_uniform_mat3(prog, name, mat3):
+    loc = GL.glGetUniformLocation(prog, name)
+    GL.glUniformMatrix3fv(loc, 1, GL.GL_TRUE, mat3)
+
+def set_uniform_vec3(prog, name, v):
+    loc = GL.glGetUniformLocation(prog, name)
+    GL.glUniform3f(loc, float(v[0]), float(v[1]), float(v[2]))
+
+def set_uniform_u1(prog, name, u):
+    loc = GL.glGetUniformLocation(prog, name)
+    GL.glUniform1ui(loc, int(u))
+
+# ----------------- mesh generation -----------------
+
+def make_uv_sphere_exploded(lat=32, lon=48, radius=0.9):
+    """
+    Returns exploded triangle arrays:
+      pos: (N,3) float32
+      nor: (N,3) float32
+      bary:(N,3) float32
+      face:(N,)  uint32  (same face id repeated 3 times)
+    """
+    # create vertex grid
+    verts = []
+    for i in range(lat + 1):
+        th = math.pi * i / lat
+        y = math.cos(th)
+        r = math.sin(th)
+        for j in range(lon + 1):
+            ph = 2 * math.pi * j / lon
+            x = r * math.sin(ph)
+            z = r * math.cos(ph)
+            verts.append((x, y, z))
+    verts = np.array(verts, dtype=np.float32) * radius
+
+    def vid(i, j):
+        return i * (lon + 1) + j
+
+    # indexed triangles
+    tris = []
+    for i in range(lat):
+        for j in range(lon):
+            a = vid(i, j)
+            b = vid(i + 1, j)
+            c = vid(i + 1, j + 1)
+            d = vid(i, j + 1)
+            # two triangles per quad (skip degenerate caps are fine here)
+            tris.append((a, b, c))
+            tris.append((a, c, d))
+
+    # explode + attach bary + face id
+    pos = []
+    nor = []
+    bary = []
+    face = []
+
+    b0 = (1.0, 0.0, 0.0)
+    b1 = (0.0, 1.0, 0.0)
+    b2 = (0.0, 0.0, 1.0)
+
+    face_id = 1
+    for (ia, ib, ic) in tris:
+        pa, pb, pc = verts[ia], verts[ib], verts[ic]
+
+        # normals: sphere normal = normalized position (radius cancels)
+        na = normalize(pa.copy())
+        nb = normalize(pb.copy())
+        nc = normalize(pc.copy())
+
+        pos.extend([pa, pb, pc])
+        nor.extend([na, nb, nc])
+        bary.extend([b0, b1, b2])
+        face.extend([face_id, face_id, face_id])
+        face_id += 1
+
+    return (
+        np.asarray(pos, dtype=np.float32),
+        np.asarray(nor, dtype=np.float32),
+        np.asarray(bary, dtype=np.float32),
+        np.asarray(face, dtype=np.uint32),
+        face_id - 1
+    )
+
+# ----------------- main widget -----------------
+
+class ShaderPickSphere(OpenGLFrame):
+    def initgl(self):
+        # --- GL sanity print ---
+        renderer = GL.glGetString(GL.GL_RENDERER)
+        version = GL.glGetString(GL.GL_VERSION)
+        print("GL_RENDERER:", renderer.decode() if renderer else None)
+        print("GL_VERSION :", version.decode() if version else None)
+
+        GL.glEnable(GL.GL_DEPTH_TEST)
+        GL.glClearColor(0.08, 0.08, 0.10, 1.0)
+
+        # Shaders
+        self.prog_beauty = link_program(BEAUTY_VS, BEAUTY_FS)
+        self.prog_pick = link_program(PICK_VS, PICK_FS)
+
+        # Mesh
+        self.pos, self.nor, self.bary, self.face, self.num_faces = make_uv_sphere_exploded()
+        self.vertex_count = self.pos.shape[0]
+
+        # VAO/VBOs
+        self.vao = GL.glGenVertexArrays(1)
+        GL.glBindVertexArray(self.vao)
+
+        self.vbo_pos = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_pos)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, self.pos.nbytes, self.pos, GL.GL_STATIC_DRAW)
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
+
+        self.vbo_nor = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_nor)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, self.nor.nbytes, self.nor, GL.GL_STATIC_DRAW)
+        GL.glEnableVertexAttribArray(1)
+        GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
+
+        self.vbo_bary = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_bary)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, self.bary.nbytes, self.bary, GL.GL_STATIC_DRAW)
+        GL.glEnableVertexAttribArray(2)
+        GL.glVertexAttribPointer(2, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
+
+        self.vbo_face = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_face)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, self.face.nbytes, self.face, GL.GL_STATIC_DRAW)
+        GL.glEnableVertexAttribArray(3)
+        # integer attribute
+        GL.glVertexAttribIPointer(3, 1, GL.GL_UNSIGNED_INT, 0, None)
+
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+        GL.glBindVertexArray(0)
+
+        # Picking FBO (created on first draw / resize)
+        self.pick_fbo = None
+        self.pick_tex_obj = None
+        self.pick_tex_face = None
+        self.pick_tex_bary = None
+        self.pick_depth = None
+        self._fb_w = 0
+        self._fb_h = 0
+
+        # Camera state
+        self.center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.yaw = 0.0
+        self.pitch = 0.0
+        self.distance = 3.0
+        self.light_world = np.array([2.0, 2.0, 4.0], dtype=np.float32)
+
+        # Mouse
+        self._dragging = False
+        self._press_xy = (0, 0)
+        self._last_xy = (0, 0)
+
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", self._on_release)
+
+        self.bind("<MouseWheel>", self._on_wheel)      # Windows/macOS
+        self.bind("<Button-4>", self._on_wheel_linux)  # Linux
+        self.bind("<Button-5>", self._on_wheel_linux)
+
+        self.focus_set()
+
+        # Continuous redraw (simple/reliable)
+        self.after(16, self._tick)
+
+    # ---- redraw scheduling ----
+    def _tick(self):
+        self._request_redraw()
+        self.after(16, self._tick)
+
+    def _request_redraw(self):
+        # pyopengltk draws via tkExpose -> _display -> redraw
+        try:
+            self.tkExpose()
+        except Exception:
+            try:
+                self._display()
+            except Exception:
+                self.update_idletasks()
+
+    # ---- camera helpers ----
+    def _eye_pos(self):
+        cy = math.cos(self.yaw)
+        sy = math.sin(self.yaw)
+        cp = math.cos(self.pitch)
+        sp = math.sin(self.pitch)
+        dirx = sy * cp
+        diry = sp
+        dirz = cy * cp
+        return self.center + self.distance * np.array([dirx, diry, dirz], dtype=np.float32)
+
+    def _matrices(self, w, h):
+        eye = self._eye_pos()
+        up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        view = look_at(eye, self.center, up)
+        proj = perspective(45.0, w / float(h), 0.1, 200.0)
+        model = np.eye(4, dtype=np.float32)
+        mvp = proj @ view @ model
+        normal_mat = np.linalg.inv(model[:3, :3]).T.astype(np.float32)
+        return eye, model, view, proj, mvp, normal_mat
+
+    def _camera_basis(self):
+        eye = self._eye_pos()
+        f = normalize(self.center - eye)               # forward
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        r = normalize(np.cross(f, world_up))           # right
+        u = np.cross(r, f)                             # up
+        return r, u, f
+
+    # ---- input ----
+    def _on_press(self, e):
+        self._dragging = True
+        self._press_xy = (e.x, e.y)
+        self._last_xy = (e.x, e.y)
+
+    def _on_drag(self, e):
+        if not self._dragging:
+            return
+
+        x0, y0 = self._last_xy
+        dx = e.x - x0
+        dy = e.y - y0
+        self._last_xy = (e.x, e.y)
+
+        shift = (e.state & 0x0001) != 0  # common shift bit in Tk
+
+        w = max(1, self.winfo_width())
+        h = max(1, self.winfo_height())
+        min_dim = max(1, min(w, h))
+
+        if shift:
+            # pan in view plane
+            pan_speed = 2.0 * self.distance / float(min_dim)
+            r, u, _ = self._camera_basis()
+            self.center = self.center + (-dx) * pan_speed * r + (dy) * pan_speed * u
+        else:
+            # orbit
+            rot_speed = 2.5 / float(min_dim)
+            self.yaw += dx * rot_speed
+            self.pitch += dy * rot_speed
+            self.pitch = clamp(self.pitch, -1.45, 1.45)
+
+    def _on_release(self, e):
+        self._dragging = False
+        # click pick if it was a small movement (i.e., not a drag)
+        px, py = self._press_xy
+        dist2 = (e.x - px) ** 2 + (e.y - py) ** 2
+        if dist2 <= 4:  # ~2px threshold
+            self.pick_at(e.x, e.y)
+
+    def _on_wheel(self, e):
+        delta = e.delta / 120.0 if abs(e.delta) >= 120 else e.delta
+        self._zoom(delta)
+
+    def _on_wheel_linux(self, e):
+        delta = 1.0 if e.num == 4 else -1.0
+        self._zoom(delta)
+
+    def _zoom(self, delta):
+        self.distance *= math.exp(-0.15 * float(delta))
+        self.distance = clamp(self.distance, 0.3, 50.0)
+
+    # ---- FBO management ----
+    def _ensure_pick_fbo(self, w, h):
+        if self.pick_fbo is not None and self._fb_w == w and self._fb_h == h:
+            return
+
+        # delete old if exists
+        if self.pick_fbo is not None:
+            GL.glDeleteFramebuffers(1, [self.pick_fbo])
+            GL.glDeleteTextures([self.pick_tex_obj, self.pick_tex_face, self.pick_tex_bary])
+            GL.glDeleteRenderbuffers(1, [self.pick_depth])
+
+        self._fb_w, self._fb_h = w, h
+
+        self.pick_fbo = GL.glGenFramebuffers(1)
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.pick_fbo)
+
+        # Object ID texture: R32UI
+        self.pick_tex_obj = GL.glGenTextures(1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.pick_tex_obj)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_R32UI, w, h, 0, GL.GL_RED_INTEGER, GL.GL_UNSIGNED_INT, None)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, self.pick_tex_obj, 0)
+
+        # Face ID texture: R32UI
+        self.pick_tex_face = GL.glGenTextures(1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.pick_tex_face)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_R32UI, w, h, 0, GL.GL_RED_INTEGER, GL.GL_UNSIGNED_INT, None)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT1, GL.GL_TEXTURE_2D, self.pick_tex_face, 0)
+
+        # Barycentric: RG32F
+        self.pick_tex_bary = GL.glGenTextures(1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.pick_tex_bary)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RG32F, w, h, 0, GL.GL_RG, GL.GL_FLOAT, None)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT2, GL.GL_TEXTURE_2D, self.pick_tex_bary, 0)
+
+        # Depth buffer
+        self.pick_depth = GL.glGenRenderbuffers(1)
+        GL.glBindRenderbuffer(GL.GL_RENDERBUFFER, self.pick_depth)
+        GL.glRenderbufferStorage(GL.GL_RENDERBUFFER, GL.GL_DEPTH_COMPONENT24, w, h)
+        GL.glFramebufferRenderbuffer(GL.GL_FRAMEBUFFER, GL.GL_DEPTH_ATTACHMENT, GL.GL_RENDERBUFFER, self.pick_depth)
+
+        GL.glDrawBuffers(3, [GL.GL_COLOR_ATTACHMENT0, GL.GL_COLOR_ATTACHMENT1, GL.GL_COLOR_ATTACHMENT2])
+
+        status = GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)
+        if status != GL.GL_FRAMEBUFFER_COMPLETE:
+            raise RuntimeError(f"Pick FBO incomplete: 0x{status:X}")
+
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+
+    # ---- rendering ----
+    def _render_pick_pass(self, w, h, eye, model, mvp):
+        self._ensure_pick_fbo(w, h)
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.pick_fbo)
+        GL.glViewport(0, 0, w, h)
+        GL.glDisable(GL.GL_BLEND)
+        GL.glEnable(GL.GL_DEPTH_TEST)
+
+        # clear: obj=0, face=0, bary=(0,0)
+        GL.glClearBufferuiv(GL.GL_COLOR, 0, np.array([0], dtype=np.uint32))
+        GL.glClearBufferuiv(GL.GL_COLOR, 1, np.array([0], dtype=np.uint32))
+        GL.glClearBufferfv(GL.GL_COLOR, 2, np.array([0.0, 0.0], dtype=np.float32))
+        GL.glClear(GL.GL_DEPTH_BUFFER_BIT)
+
+        GL.glUseProgram(self.prog_pick)
+        set_uniform_mat4(self.prog_pick, "uMVP", mvp)
+        set_uniform_u1(self.prog_pick, "uObjectId", 1)
+
+        GL.glBindVertexArray(self.vao)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, self.vertex_count)
+        GL.glBindVertexArray(0)
+        GL.glUseProgram(0)
+
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+
+    def _render_beauty_pass(self, w, h, eye, model, mvp, normal_mat):
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+        GL.glViewport(0, 0, w, h)
+        GL.glEnable(GL.GL_DEPTH_TEST)
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+
+        GL.glUseProgram(self.prog_beauty)
+        set_uniform_mat4(self.prog_beauty, "uMVP", mvp)
+        set_uniform_mat4(self.prog_beauty, "uModel", model)
+        set_uniform_mat3(self.prog_beauty, "uNormalMat", normal_mat)
+        set_uniform_vec3(self.prog_beauty, "uEyeW", eye)
+        set_uniform_vec3(self.prog_beauty, "uLightW", self.light_world)
+
+        GL.glBindVertexArray(self.vao)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, self.vertex_count)
+        GL.glBindVertexArray(0)
+        GL.glUseProgram(0)
+
+    def redraw(self):
+        w = max(1, self.winfo_width())
+        h = max(1, self.winfo_height())
+
+        eye, model, view, proj, mvp, normal_mat = self._matrices(w, h)
+
+        # Update picking buffer every frame (simple + always correct)
+        self._render_pick_pass(w, h, eye, model, mvp)
+
+        # Normal render
+        self._render_beauty_pass(w, h, eye, model, mvp, normal_mat)
+
+        GL.glFlush()
+
+    # ---- picking ----
+    def pick_at(self, x_tk, y_tk):
+        w = max(1, self.winfo_width())
+        h = max(1, self.winfo_height())
+
+        # Convert Tk coords (origin top-left) to GL coords (origin bottom-left)
+        x = int(clamp(x_tk, 0, w - 1))
+        y = int(clamp(h - 1 - y_tk, 0, h - 1))
+
+        # Ensure pick pass is current for this frame
+        eye, model, view, proj, mvp, normal_mat = self._matrices(w, h)
+        self._render_pick_pass(w, h, eye, model, mvp)
+
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.pick_fbo)
+
+        # Read object id
+        obj = np.zeros((1,), dtype=np.uint32)
+        GL.glReadBuffer(GL.GL_COLOR_ATTACHMENT0)
+        GL.glReadPixels(x, y, 1, 1, GL.GL_RED_INTEGER, GL.GL_UNSIGNED_INT, obj)
+
+        # Read face id
+        face = np.zeros((1,), dtype=np.uint32)
+        GL.glReadBuffer(GL.GL_COLOR_ATTACHMENT1)
+        GL.glReadPixels(x, y, 1, 1, GL.GL_RED_INTEGER, GL.GL_UNSIGNED_INT, face)
+
+        # Read bary (u,v)
+        bary_uv = np.zeros((2,), dtype=np.float32)
+        GL.glReadBuffer(GL.GL_COLOR_ATTACHMENT2)
+        GL.glReadPixels(x, y, 1, 1, GL.GL_RG, GL.GL_FLOAT, bary_uv)
+
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+
+        obj_id = int(obj[0])
+        face_id = int(face[0])
+        b0 = float(bary_uv[0])
+        b1 = float(bary_uv[1])
+        b2 = 1.0 - b0 - b1
+
+        if obj_id == 0 or face_id == 0:
+            print(f"[pick] at ({x_tk},{y_tk}) -> nothing hit")
+            return
+
+        # Clamp tiny numerical overshoots
+        b0, b1, b2 = (max(-1e-4, min(1.0, v)) for v in (b0, b1, b2))
+
+        print(f"[pick] at ({x_tk},{y_tk}) -> object={obj_id} face={face_id} bary=({b0:.4f},{b1:.4f},{b2:.4f})")
+
+
+def main():
+    root = tk.Tk()
+    root.title("Tkinter OpenGL Shader Sphere + ID/Barycentric Picking")
+
+    frame = ShaderPickSphere(root, width=960, height=720)
+    frame.pack(fill="both", expand=True)
+
+    tk.Label(
+        root,
+        text="Left-drag: orbit | Shift+Left-drag: pan | Wheel: zoom | Click (no-drag): print object/face/bary",
+        anchor="w"
+    ).pack(fill="x")
+
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
+ 

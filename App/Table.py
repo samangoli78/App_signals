@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog,messagebox
 import pandas as pd
 import numpy as np
 
@@ -13,6 +13,7 @@ class EditableTree(ttk.Treeview):
         self.on_cell_move = lambda ctx: None
         self.on_edit_commit = lambda ctx: None
         self.on_select_row = lambda ctx: None
+        
 
         self.cur_iid: str | None = None
         self.cur_col: int = 0
@@ -36,6 +37,78 @@ class EditableTree(ttk.Treeview):
 
         self.bind("<Return>", self._ev_enter, add="+")
         self.bind("<Escape>", self._ev_escape, add="+")
+
+    def init_from_df(self, df, *, keep_col_widths=True, reset_cur_col=True):
+        """
+        Data-layer re-init (index is always dropped):
+        - clears rows
+        - uses df.columns only
+        - inserts df rows
+        - resets cursor/selection to a known start state
+        """
+
+        # --- normalize dataframe ---
+        # drop index semantics entirely
+        df = df.reset_index()
+        self.df = df
+
+        # --- close active editor ---
+        self.close_editor()
+
+        # --- clear rows ---
+        for iid in self.get_children():
+            self.delete(iid)
+
+        # --- reset cursor state ---
+        self.cur_iid = None
+        if reset_cur_col:
+            self.cur_col = 0
+
+        # --- set table schema ---
+        new_cols = [str(c) for c in df.columns]
+        old_cols = list(self["columns"]) if self["columns"] else []
+
+        widths = {}
+        if keep_col_widths and old_cols:
+            for c in old_cols:
+                try:
+                    widths[c] = self.column(c, "width")
+                except Exception:
+                    pass
+
+        self["columns"] = new_cols
+        for c in new_cols:
+            self.heading(c, text=c)
+            self.column(
+                c,
+                width=widths.get(c, 120),
+                minwidth=50,
+                stretch=True,
+                anchor="center",
+            )
+
+        # --- insert rows ---
+        for i, (_, row) in enumerate(df.iterrows()):
+            iid = f"row{i}"
+            self.insert(
+                "",
+                "end",
+                iid=iid,
+                values=[row[c] for c in df.columns],
+            )
+
+        # --- reset selection/focus ---
+        kids = self.get_children()
+        if kids:
+            self.cur_iid = kids[0]
+            self.selection_set(self.cur_iid)
+            self.focus(self.cur_iid)
+            self.see(self.cur_iid)
+            self._set_active_row_tag()
+        else:
+            self.selection_remove(self.selection())
+            self.focus("")
+
 
     # ---------------------------
     # Helpers
@@ -100,8 +173,9 @@ class EditableTree(ttk.Treeview):
     def _set_active_row_tag(self):
         # clear tag from all rows (cheap enough for moderate sizes)
         for iid in self.get_children():
-            tags = tuple(t for t in (self.item(iid).get("tags") or ()) if t != "active_row")
-            self.item(iid, tags=tags)
+            tags = self.item(iid).get("tags") or ()
+            new_tags = tuple(t for t in tags if t != "active_row")
+            self.item(iid, tags=new_tags)
 
         if self.cur_iid:
             tags = set(self.item(self.cur_iid).get("tags") or ())
@@ -116,7 +190,6 @@ class EditableTree(ttk.Treeview):
         if self._edit_entry is not None:
             try:
                 self._edit_entry.destroy()
-                self.focus_set()
             except Exception:
                 pass
             self._edit_entry = None
@@ -144,10 +217,28 @@ class EditableTree(ttk.Treeview):
         # destroy editor on focus out
         entry.bind("<FocusOut>", lambda e: self.close_editor(), add="+")
         entry.bind("<Escape>", lambda e: (self.close_editor(), self.focus_force()), add="+")
-        entry.bind("<Up>",   lambda event:self.close_editor(), add="+")
-        entry.bind("<Down>",lambda event:self.close_editor(), add="+")
+        entry.bind("<Up>",   lambda event: (self.close_editor(), self.focus_force()), add="+")
+        entry.bind("<Down>",lambda event: (self.close_editor(), self.focus_force()), add="+")
 
         self._edit_entry = entry
+        def go_to_next():
+            n = int(self.cur_iid.split("row")[-1]) + 1
+            next_iid=f"row{n}"
+            self.cur_iid = next_iid
+            try:
+                self.selection_set(next_iid)
+                self.focus(next_iid)
+                self.see(next_iid)
+            except Exception as e:
+                print(e)
+                self._ensure_current_cell()
+
+        def on_entry_Enter(e):
+            commit(entry.get())
+            self.close_editor()
+            self.focus_force()
+            go_to_next()
+            self.edit_current_cell()
 
         def commit(value: str):
             vals2 = self._get_values(iid)
@@ -184,6 +275,8 @@ class EditableTree(ttk.Treeview):
             def pick(item):
                 commit(item)
                 close_menu()
+                go_to_next()
+                self.edit_current_cell()
 
             for item in self.defaults[col]:
                 menu.add_command(label=item, command=lambda it=item: pick(it))
@@ -193,8 +286,9 @@ class EditableTree(ttk.Treeview):
             sx = self.winfo_rootx() + x
             sy = self.winfo_rooty() + y + h
             menu.tk_popup(sx, sy)
-
-        entry.bind("<Return>", lambda e: (commit(entry.get()), self.close_editor(), self.focus_force()), add="+")
+        
+        entry.bind("<Return>", on_entry_Enter , add="+")
+        
 
     # ---------------------------
     # Events
@@ -231,7 +325,7 @@ class EditableTree(ttk.Treeview):
         if event.widget.focus_get() is not event.widget:
             return None
 
-        self.close_editor()
+        
 
         def after():
             sel = self.selection()
@@ -248,7 +342,7 @@ class EditableTree(ttk.Treeview):
         if event.widget.focus_get() is not event.widget:
             return None
 
-        self.close_editor()
+        
         self._ensure_current_cell()
 
         if event.keysym == "Left":
@@ -300,6 +394,7 @@ class EditableTree(ttk.Treeview):
 
         menu.add_command(label="Edit cell", command=edit_here)
         menu.add_command(label="Save", command=self.save_to_file)
+        menu.add_command(label="load", command=self.load_csv)
         menu.add_separator()
         menu.add_command(label="Close", command=close_menu)
         menu.bind("<Escape>", close_menu)
@@ -308,6 +403,40 @@ class EditableTree(ttk.Treeview):
     # ---------------------------
     # Save / export
     # ---------------------------
+    def load_csv(self):
+        path = filedialog.askopenfilename(
+            title="Load table data",
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("Text files", "*.txt"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return  # user cancelled
+
+        try:
+            # auto-detect separator; works for csv and most txt
+            df = pd.read_csv(
+                path,
+                sep=None,
+                engine="python",
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Load failed",
+                f"Could not load file:\n{path}\n\n{e}",
+            )
+            return
+
+        # normalize column names to strings (Treeview requires str)
+        df.columns = [str(c) for c in df.columns]
+
+        # optional: replace NaN with empty string for editing
+        df = df.fillna("")
+
+        # data-layer re-init (your function)
+        self.init_from_df(df)
 
     def save_to_file(self):
         file = filedialog.asksaveasfilename(
@@ -337,16 +466,7 @@ class TableWidget(tk.Frame):
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        cols = ["index"] + list(df.columns)
-
-        self.tree = EditableTree(self, columns=cols, show="headings", selectmode="browse")
-
-        for c in cols:
-            self.tree.heading(c, text=str(c))
-            self.tree.column(c, width=90, minwidth=50, anchor="center", stretch=True)
-
-        for i, row in enumerate(df.values):
-            self.tree.insert("", "end", iid=f"row{i}", values=[i] + list(row))
+        self.tree = EditableTree(self, columns=(), show="headings", selectmode="browse")
 
         vs = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         hs = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
@@ -355,6 +475,9 @@ class TableWidget(tk.Frame):
         self.tree.grid(row=0, column=0, sticky="nsew")
         vs.grid(row=0, column=1, sticky="ns")
         hs.grid(row=1, column=0, sticky="ew")
+
+        self.tree.init_from_df(df)
+
 
 
 if __name__ == "__main__":
