@@ -425,9 +425,8 @@ class App(tk.Tk):
         for key, ax in self.axes.items():
             if ax is selected_ax and key == "top":
                 for area in self.Areas[key]:
-                    area.configure_shade_attr(x=area.x, y=ax.get_ylim())
-                    for lin in area.lines:
-                        lin.set_ydata(ax.get_ylim())
+                    area.configure_shade_attr(x=area.t, y=ax.get_ylim())
+
                         
         ax.figure.canvas.draw_idle()
         self.update()

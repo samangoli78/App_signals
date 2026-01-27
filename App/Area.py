@@ -53,8 +53,8 @@ class Area:
             alpha=0.20,
             edgecolor="none",
         )
-        self.line_L.set_picker(2)
-        self.line_R.set_picker(2)
+        self.line_L.set_picker(1)
+        self.line_R.set_picker(1)
 
         ax.add_line(self.line_L)
         ax.add_line(self.line_R)
@@ -70,7 +70,7 @@ class Area:
         cid_follower = None
         cid_releaser = None
         def on_release(event):
-            nonlocal cid_follower,cid_releaser
+            nonlocal cid_follower,cid_releaser,cid_pick
             # end drag on ANY release (prevents stacking)
             # assign delta, disconnect, then update_plot
             t0, t1 = sorted(self.t)
@@ -154,5 +154,19 @@ class Area:
             cid_releaser = self.canvas.mpl_connect("button_release_event", on_release)
 
         cid_pick = self.canvas.mpl_connect("pick_event", on_pick)
+
+def configure_shade_attr(self, x, y) -> None:
+    # y is (y0, y1)
+    y0, y1 = y
+    self.ylim = [y0, y1]  # keep internal state consistent
+
+    self.rect.set_xy((x[0], y0))
+    self.rect.set_width(abs(x[1] - x[0]))
+    self.rect.set_height(y1 - y0)
+
+    # keep both vertical lines spanning the new y-range
+    self.line_L.set_ydata([y0, y1])
+    self.line_R.set_ydata([y0, y1]) 
+
 
 
