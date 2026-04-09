@@ -27,7 +27,6 @@ from .Toplevel import Toplevel as tp
 
 
 class App(tk.Tk):
-    #meta parameters
     apps=[]
     n_fft=[100]
     hop_length=[5]
@@ -39,23 +38,9 @@ class App(tk.Tk):
     len_hann=[5]
     max_pooling_length=[1]
     TH=[0.45]
-
     def __init__(self, name="Saman", carto:Carto=None):
-        # make *new copies* so each instance has independent lists
-        self.n_fft = App.n_fft.copy()
-        self.hop_length = App.hop_length.copy()
-        self.win_length = App.win_length.copy()
-        self.high_b0 = App.high_b0.copy()
-        self.high_b1 = App.high_b1.copy()
-        self.low_b0 = App.low_b0.copy()
-        self.low_b1 = App.low_b1.copy()
-        self.len_hann = App.len_hann.copy()
-        self.max_pooling_length = App.max_pooling_length.copy()
-        self.TH = App.TH.copy()
-        App.apps.append(self)
-
-
         self.forcefull=False
+        self.apps.append(self)
         self.is_running=True
         self.carto = carto
         self.cont = self.carto.cont
@@ -66,29 +51,22 @@ class App(tk.Tk):
         self.i, self.j = 0, 0
         self.Table=[]
         #self.i_j_to_index(labels="hide")
-        self.i_j_to_index(labels="unhide")
+        self.i_j_to_index(labels="hide")
         self.creating_delta()
-        all_columns = self.carto.cont[0][0].columns
-        self.Table = pd.DataFrame(self.Table, columns=all_columns)
-
-        # sanity check: lengths must match
-        n = len(self.to_i_j)
-        if len(self.Table) != n:
-            raise ValueError(f"Row count mismatch: Table={len(self.Table)} vs index map={n}")
         # going to the first item of the list, which is arbitrary and could be any other numbers, 
         # and accesss the first element that is a dataframe containing information of the points
-
-        self.Table = self.Table.assign(Comment="", delta=pd.Series(self.delta, dtype=object))
+        all_columns=self.carto.cont[0][0].columns
+        self.Table=pd.DataFrame(self.Table,columns=all_columns)
+        self.Table=pd.concat([self.Table,pd.DataFrame(np.zeros(len(self.to_i_j)),columns=["Coment"])],axis=1)
+        self.Table=pd.concat([self.Table,pd.DataFrame(np.zeros(len(self.to_i_j)),columns=["delta"])],axis=1)
 
     def creating_delta(self):
         #delta is a list of dictionaries that contains the information about the stimulations and sinus signals.
         #preallocation of the delta list
-        self.delta=[None]*len(self.to_i_j)
+        self.delta=[0]*len(self.to_i_j)
         
     def i_j_to_index(self,labels="unhide"):
-        #"takes i , j gives index"
         self.to_index=[]
-        #"takes index give i_j"
         self.to_i_j=[]
         self.labels_memory=[]
         carto=self.carto
@@ -96,26 +74,25 @@ class App(tk.Tk):
         # structure of the cont: [section1,section2,section3,...]
         # structure of the section: [dataframe, name of the file, signals]
         for i,section in enumerate(carto.cont):
-            df,_,_=section
             self.to_index.append([])
             self.labels_memory.append([])
             section: tuple[pd.DataFrame, str, pd.DataFrame]
-            col = "label_color"
-            col_idx = df.columns.get_loc(col)  # for fast iat use
-            for j in range(len(df)):
-                self.labels_memory[i].append(df.iat[j, col_idx])
+            for j,dat in enumerate(section[0].values):
+                self.labels_memory[i].append(carto.cont[i][0].loc[j,"label_color"])
                 #hiding the labels
                 if labels=="hide":
-                    df.iat[j, col_idx] = ""
+                    carto.cont[i][0].loc[j,"label_color"]=""
                 # i,j to index
                 self.to_index[i].append(ind)
                 #indexs to i,j
                 self.to_i_j.append([i,j])
                 # updating the table matrix
-                self.Table.append(df.iloc[j].values)
+                self.Table.append(dat)
                 # increaing the index after each nested itteration
                 ind+=1
                 
+
+
     def start(self):
 
         super().__init__()
@@ -129,21 +106,18 @@ class App(tk.Tk):
         self.frame.pack(fill="x",expand=False)
         self.button_dropdown=tk.Button(self.frame,text="Options",command=self.drop_down)
         self.button_dropdown.pack(side=tk.LEFT,padx=10)
-        df_temp:pd.DataFrame=self.cont[self.i][0]
-        self.label = tk.Label(self.frame, text=f"point {df_temp.iat[self.j,df_temp.columns.get_loc('point number')]}",bg="grey",fg="white")
+        self.label = tk.Label(self.frame, text=f"point {self.cont[self.i][0]['point number'].values[self.j]}",bg="grey",fg="white")
         self.label.config(font=("timesnewroman", 10))
         self.label.pack(fill="x",side="left",padx=10)
         
-        self.check_boxes={"Energy":None}
+        self.check_boxes={"Energy":None,"Only_Green":None}
         for key in self.check_boxes.keys():
             self.check_boxes[key]=tk.IntVar()
-            check_box=tk.Checkbutton(self.frame,variable=self.check_boxes[key],text=key,font=("timesnewroman",10))
+            check_box=tk.Checkbutton(self.frame,variable=self.check_boxes[key],command=self.checker,text=key,font=("timesnewroman",10))
             check_box.pack(side=tk.LEFT,fill="x", expand=False)
         self.button_trip=tk.Button(self.frame,text="Switch to Triple Extra Protocol",command=self.triple_protocol)
         self.button_trip.pack(side=tk.LEFT,padx=10)
         self.button_VT=tk.Button(self.frame,text="Switch to VT Protocol",command=self.VT_protocol)
-        self.button_VT.pack(side=tk.LEFT,padx=10)
-        self.button_VT=tk.Button(self.frame,text="compute_all",command=self.compute_all)
         self.button_VT.pack(side=tk.LEFT,padx=10)
         self.button_screen=tk.Button(self.frame,text="screen shot",command=lambda name=None:self.capture_window(name))
         self.button_screen.pack(side=tk.LEFT,padx=10)
@@ -153,21 +127,26 @@ class App(tk.Tk):
         self.panned_window.add(self.frame3,weight=1)
         #self.frame3.pack(expand=True,fill="both")
         self.table=TableWidget(self.frame3,self.Table)
-        self.table.pack(fill="both", expand=True)           # IMPORTANT: it's a Frame now
-        tv = self.table.tree                               # the EditableTree instance
+        self.table.pack(fill="both", expand=True)  
+        tv = self.table.tree
+        tv.defaults = {1: ["Reject", "POS", "NEG"]}
+        
 
-        tv.defaults = {1: ["Reject", "POS", "NEG"]}         # column index for label_color in YOUR table
         self.frame1=tk.Frame(self,pady=5,background="white")
         self.panned_window.add(self.frame1,weight=2)
         self.set_figure()
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame1)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.ccs={}
+        for r,i in enumerate(self.axes.keys()):
+            self.cc=tk.Canvas(self.frame1,width=110,height=130,bg="white",highlightbackground="white")
+            self.cc.grid(column=1,row=r,sticky="")
+            self.ccs[i]=self.cc
 
         self.frame1.grid_rowconfigure((0,1), weight=1)
         self.frame1.grid_columnconfigure(0, weight=6)
         self.frame1.grid_columnconfigure(1, weight=1)
-        self.main_control()
-        self.plot()      
+        self.main()
+        self.plot()
+        
 
     def capture_window(self,name=None):
             root=self
@@ -178,16 +157,16 @@ class App(tk.Tk):
             width = root.winfo_width()
             height = root.winfo_height()    #get details about window
             takescreenshot = ImageGrab.grab(bbox=(x, y, x+width, y+height))
-            takescreenshot.save(name,dpi=500)
+            takescreenshot.save(name,dpi=(1920,1080))
 
     def triple_protocol(self,event=None):
+
         self.triple_active=not(self.triple_active)
         if self.triple_active:
             self.button_trip.config(text="Turn off Triple Extra Protocol")
         else:
             self.button_trip.config(text="Switch to Triple Extra Protocol")
         self.update_plot()
-
     def VT_protocol(self,event=None):
 
         self.VT_active=not(self.VT_active)
@@ -198,28 +177,25 @@ class App(tk.Tk):
         self.update_plot()
         
     def set_figure(self,x=2,y=1,mod=False):
-        self.fig = plt.figure()
-        self.axes = {}
-        ax_top=self.fig.add_subplot(2, 1, 1)
-        ax_top.set_xlim([0,2.5])
-        ax_top.set_ylim([-3,3])
-        ax_top.set_autoscale_on(False)   # master autoscale switch off
-        ax_top.autoscale(False)
-        ax_top.set_autoscalex_on(False)
-        ax_top.set_autoscaley_on(False)
+        
+        self.fig, self.axes = plt.subplots(x,y)
+        plt.subplots_adjust(left=0.05, right=0.98, top=0.9, bottom=0.05)
+        self.axes={m:ax(self.axes[i],m,self.fig) for i,m in enumerate(["top","bot"])}
+        print(np.shape(self.axes))
+        self.fig.clf()
+        self.axes["top"]=ax(self.fig.add_subplot(2,1,1),"top",self.fig)
+        self.axes["bot"]=ax(self.fig.add_subplot(2,1,2),"bot",self.fig)
+        [x.update(xlim=[0,2.5],ylim=[-1,1]) for x in self.axes.values()]
+        if mod:
+            #clear frame
+            for widget in self.frame1.winfo_children():
+                widget.destroy()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame1)
+        self.canvas.get_tk_widget().grid(column=0,row=0,rowspan=2,sticky=tk.NSEW)
 
-        ax_bot=self.fig.add_subplot(2, 1, 2, sharex=ax_top)
-        ax_bot.set_ylim([-20,20])
-        ax_bot.set_autoscale_on(False)   # master autoscale switch off
-        ax_bot.autoscale(False)
-        ax_bot.set_autoscalex_on(False)
-        ax_bot.set_autoscaley_on(False)
+        
 
-        self.fig.subplots_adjust(left=0.05, right=0.98, top=0.9, bottom=0.05)
-        self.axes["top"]=ax_top
-        self.axes["bot"]=ax_bot
-
-    def main_control(self):
+    def main(self):
 
         #self.bind("<Right>",self.p_increase)
         #self.bind("<Left>",self.p_decrease)
@@ -236,202 +212,172 @@ class App(tk.Tk):
             elif event.key=="down":
                 self.p_increase(event)
 
+
         self.canvas.mpl_connect("key_press_event",mpl_arrow) 
         self.canvas.mpl_connect("button_press_event", self.on_right_click) 
-        
+        self.canvas.mpl_connect("button_release_event", self.on_right_release)
         tv = self.table.tree
 
         # row selection (mouse click / Up/Down changes selection)
-        def _table_select_ctx(ctx):
-            # ctx["row"] is the table row index
-            if ctx["row"] is None:
-                return
-            i,j=self.to_i_j[ctx["row"]]
-            print("selected row with select binding function",ctx["row"])
-            self.i=i
-            self.j=j
-            self.update_plot()
-
-        tv.on_select_row = _table_select_ctx
-
-
-        def _table_move_ctx(ctx):
-            # You want Up/Down to navigate points in your plot:
-            if ctx["key"] == "Up":
-                self.p_decrease()   # Up should go to previous (your original mapping was inverted)
-            elif ctx["key"] == "Down":
-                self.p_increase()
+        tv.on_select_row = lambda ctx: self._table_select_ctx(ctx)
 
         # cell move (Up/Down/Left/Right/Enter triggers this hook)
-        tv.on_cell_move = _table_move_ctx
-
-        def _table_commit_ctx(ctx):
-            # ctx has: row, col, value
-            row = ctx.get("row")
-            col = ctx.get("col")
-            val = ctx.get("value")
-            if row is None:
-                return
-            # --- A) Save committed value to delta (your requirement) ---
-            i, j = self.to_i_j[row]
-            idx = self.to_index[i][j]
-            if col == 1:  # your label_color column rule
-                if self.triple_active:
-                    print(self.delta[idx])
-                    self.delta[idx][1] = val
-                df_carto = self.carto.cont[i][0]
-                df_carto.iat[j, df_carto.columns.get_loc("label_color")] = val
-            # --- B) After commit, the table may auto-go-next (dropdown does this).
-            # Sync app to the table's FINAL current row (once).
-            tree = self.table.tree
-            def follow_table_final_row():
-                cur_iid = tree.cur_iid or (tree.selection()[0] if tree.selection() else None)
-                if not cur_iid:
-                    return
-                new_row = tree._row_index_from_iid(cur_iid)
-                if new_row is None:
-                    return
-                self.i, self.j = self.to_i_j[new_row]
-                self.update_plot()
-            tree.after_idle(follow_table_final_row)
+        tv.on_cell_move = lambda ctx: self._table_move_ctx(ctx)
 
         # edit committed (Return, dropdown pick, focus-out if you set it to commit)
-        tv.on_edit_commit = _table_commit_ctx
+        tv.on_edit_commit = lambda ctx: self._table_commit_ctx(ctx)
+
+        #self.table.table.bind("<Double-Button-1>",self.select)
         
         self.canvas.mpl_connect("scroll_event", self.on_scroll)
         super().protocol("WM_DELETE_WINDOW", self.quit)
         # Create the figure and axis objects
+    def _table_select_ctx(self, ctx):
+        # ctx["row"] is the table row index
+        if ctx["row"] is None:
+            return
+        self.select([ctx["row"]])  # reuse your existing select(event) which expects [row]
+
+    def _table_move_ctx(self, ctx):
+        # You want Up/Down to navigate points in your plot:
+        if ctx["key"] == "Up":
+            self.p_decrease()   # Up should go to previous (your original mapping was inverted)
+        elif ctx["key"] == "Down":
+            self.p_increase()
+
+    def _table_commit_ctx(self, ctx):
+        # ctx has: row, col, value
+
+        row = ctx.get("row")
+        col = ctx.get("col")
+        val = ctx.get("value")
+        if row is None:
+            return
+
+        # --- A) Save committed value to delta (your requirement) ---
+        print("table row", row, "synced with app i,j",self.i,self.j)
+        i, j = self.to_i_j[row]
+        idx = self.to_index[i][j]
+        print( "updated app i,j",i,j)
+        if col == 1:  # your label_color column rule
+            if self.triple_active:
+                print(self.delta[idx])
+                self.delta[idx][1] = val
+
+            df_carto = self.carto.cont[i][0]
+            df_carto.iat[j, df_carto.columns.get_loc("label_color")] = val
+
+        # --- B) After commit, the table may auto-go-next (dropdown does this).
+        # Sync app to the table's FINAL current row (once).
+        tree = self.table.tree
+
+        def follow_table_final_row():
+            cur_iid = tree.cur_iid or (tree.selection()[0] if tree.selection() else None)
+            if not cur_iid:
+                return
+            new_row = tree._row_index_from_iid(cur_iid)
+            if new_row is None:
+                return
+
+            self.i, self.j = self.to_i_j[new_row]
+            self.update_plot()
+
+        tree.after_idle(follow_table_final_row)
 
     def quit(self):
         self.is_running = False
         super().quit()
         super().destroy() 
 
+
+    def checker(self):
+        self.update_plot()
+
+
     def on_right_click(self, event):
-        start_x_y = None
-        end_x_y = None
-        rect = None
-        selected_ax = None
-        follower = None
-        release_cid = None
+        
+        if event.button == 3:  # Right-click
+            for ax in self.axes.values():
+                if ax.ax==event.inaxes:
+                    self.selected_ax=ax
+                    self.start_x_y = [event.xdata,event.ydata]  # Store the x-coordinate
+                    self.end_x_y = self.start_x_y
+                    self.follower=self.canvas.mpl_connect("motion_notify_event", self.on_right_follow_mouse)
+                    self.rect=None
 
-        def on_right_follow_mouse(event):
-            nonlocal end_x_y, rect, selected_ax, start_x_y
 
-            if event.inaxes != selected_ax or event.xdata is None or event.ydata is None:
-                return
+    def on_right_follow_mouse(self,event):
+      
+        self.end_x_y=[event.xdata,event.ydata]
+        if self.rect:
+            self.rect.set_xy(self.start_x_y)
+            self.rect.set_height(self.end_x_y[1]-self.start_x_y[1])
+            self.rect.set_width(self.end_x_y[0]-self.start_x_y[0])
+        else:
+            rect=Rectangle(self.start_x_y,width=self.end_x_y[0]-self.start_x_y[0],height=self.end_x_y[1]-self.start_x_y[1],color="#00008525")
+            self.selected_ax.ax.add_artist(rect)
+            self.rect=rect
+        self.canvas.draw_idle()
+        self.update()
+    
 
-            end_x_y = [event.xdata, event.ydata]
+    def on_right_release(self, event):
+        if event.button == 3:
+            if self.rect:
+                    self.rect.remove()
+            self.canvas.mpl_disconnect(self.follower)
+            if event.inaxes==self.selected_ax.ax:
 
-            if rect:
-                rect.set_xy(start_x_y)
-                rect.set_height(end_x_y[1] - start_x_y[1])
-                rect.set_width(end_x_y[0] - start_x_y[0])
-            else:
-                rect = Rectangle(
-                    start_x_y,
-                    width=end_x_y[0] - start_x_y[0],
-                    height=end_x_y[1] - start_x_y[1],
-                    color="#00008525",
-                )
-                selected_ax.add_artist(rect)
-
+                xlim=[self.start_x_y[0],self.end_x_y[0]]
+                ylim=[self.start_x_y[1],self.end_x_y[1]]
+                duration=lambda x:x[1]-x[0]
+                if duration(xlim)< 0:
+                    xlim=xlim[-1::-1]
+                if duration(ylim)< 0:
+                    ylim=ylim[-1::-1]
+                if duration(xlim) <0.01 and duration(ylim) <0.01:
+                    if self.selected_ax.key == "bot":
+                        xlim=[0,2.5]
+                        ylim=[-10,10]
+                    else:
+                        xlim=[0,2.5]
+                        ylim=[-1,1]
+            
+                self.selected_ax.update(xlim=xlim,ylim=ylim)
+                self.selected_ax.set()
+                for a in self.Areas[self.selected_ax.key]:
+                    a.configure_shade_attr(x=a.x,y=self.selected_ax.ylim)
+                    for lin in a.lines:
+                        lin.set_ydata(self.selected_ax.ylim)
             self.canvas.draw_idle()
             self.update()
-
-        def on_right_release(event):
-            nonlocal rect, follower, release_cid, selected_ax, start_x_y, end_x_y
-
-            if event.button == 3:
-                if rect:
-                    rect.remove()
-                    rect = None
-
-                if follower is not None:
-                    self.canvas.mpl_disconnect(follower)
-                    follower = None
-
-                if release_cid is not None:
-                    self.canvas.mpl_disconnect(release_cid)
-                    release_cid = None
-
-                if event.inaxes == selected_ax and start_x_y is not None and end_x_y is not None:
-                    xlim = [start_x_y[0], end_x_y[0]]
-                    ylim = [start_x_y[1], end_x_y[1]]
-
-                    duration = lambda x: x[1] - x[0]
-                    if duration(xlim) < 0:
-                        xlim = xlim[::-1]
-                    if duration(ylim) < 0:
-                        ylim = ylim[::-1]
-
-                    if duration(xlim) < 0.01 and duration(ylim) < 0.01:
-                        for key, ax in self.axes.items():
-                            if selected_ax == ax and key == "bot":
-                                xlim = [0, 2.5]
-                                ylim = [-10, 10]
-                            elif selected_ax == ax and key == "top":
-                                xlim = [0, 2.5]
-                                ylim = [-1, 1]
-
-                    selected_ax.set_xlim(xlim)
-                    selected_ax.set_ylim(ylim)
-
-                    for key, ax in self.axes.items():
-                        if selected_ax == ax and key == "top":
-                            for a in self.Areas[key]:
-                                try:
-                                    a.configure_shade_attr(x=a.x, y=selected_ax.get_ylim())
-                                    for lin in a.lines:
-                                        lin.set_ydata(selected_ax.get_ylim())
-                                except Exception:
-                                    pass
-
-                self.canvas.draw_idle()
-                self.update()
-
-        if event.button == 3:  # Right-click
-            ax = event.inaxes
-            if ax is None or event.xdata is None or event.ydata is None:
-                return
-
-            selected_ax = ax
-            start_x_y = [event.xdata, event.ydata]
-            end_x_y = start_x_y[:]  # copy
-
-            follower = self.canvas.mpl_connect("motion_notify_event", on_right_follow_mouse)
-            release_cid = self.canvas.mpl_connect("button_release_event", on_right_release)
-            
+ 
     def on_scroll(self, event):
-        ax = event.inaxes
-        if ax is None:
-            return
-        y0, y1 = ax.get_ylim()
-        yc = 0.5 * (y0 + y1)
-        half_range = 0.5 * (y1 - y0)
+        for ax in self.axes.values():
+            if ax.ax == event.inaxes:
+                ylim = ax.ylim
+                zoom_factor = 0.1  # Define how fast you want to zoom
 
-        zoom_factor = 0.1
+                if event.button == 'up':  # Zoom in
+                    scale_factor = 1 - zoom_factor
+                elif event.button == 'down':  # Zoom out
+                    scale_factor = 1 + zoom_factor
+                else:
+                    return
 
-        if event.button == 'up':        # zoom in
-            scale = 1 - zoom_factor
-        elif event.button == 'down':    # zoom out
-            scale = 1 + zoom_factor
-        else:
-            return
-
-        new_half = half_range * scale
-        ax.set_ylim(yc - new_half, yc + new_half)
-        selected_ax=ax
-        for key, ax in self.axes.items():
-            if ax is selected_ax and key == "top":
-                for area in self.Areas[key]:
-                    area.configure_shade_attr(x=area.t, y=ax.get_ylim())
-
-                        
-        ax.figure.canvas.draw_idle()
+                # Update limits for both axes
+                ax.update(ylim=[ylim[0] * scale_factor, ylim[1] * scale_factor])
+                ax.set()
+                if self.Areas[ax.key]: 
+                    for a in self.Areas[ax.key]:
+                        a.configure_shade_attr(x=a.x,y=ax.ylim)
+                        for lin in a.lines:
+                            lin.set_ydata(ax.ylim)
+                    
+        self.canvas.draw_idle()
         self.update()
 
-    def plot_main(self,ax,x,y2,ECG_reff=None,stim_reff=None,plot=True):
+    def plot_main(self,ax,x,y2,arg="top",reff=[]):
         c1={"stim":[]}
         c1["sinus"]=[]
         c1["refs_stim"]=[]
@@ -442,313 +388,272 @@ class App(tk.Tk):
         c1["deflection_sinus"]=[]
         addition=[["#FFf5F5","High frequency"],            
                     ["#FFc5c5","Low frequency"]]
-        self.Areas["top"]=[]
-        Areas=self.Areas["top"]
-        if plot:
-            ax.plot(x,y2,alpha=0.5,linewidth=0.6)
-
-        car=self.cont[self.i][0]
-        p_number=int(car.iat[self.j,car.columns.get_loc('point number')])
-        label=car.iat[self.j,car.columns.get_loc("label_color")]
-        memory=self.delta[self.to_index[self.i][self.j]] 
-        try:
-            try:
-                p_number_mem=int(memory[0])
-                label_mem=str(memory[1])
-                dict=memory[2]
-                if p_number==p_number_mem:
-                    print("sanity check the pnumbers are aligned")
+        ax_object=ax
+        ax=ax.ax
+        ax.plot(x,y2,alpha=0.5,linewidth=0.6)
+        egm=Triple_Extra(t=x,EGM=y2)
+        if len(reff)>0:
+            egm.find_windows(self.axes["bot"].ax,stiulation=reff,refference=butter_bandpass_filter(data=self.cont[self.i][2]["V5"].values,cutoff=[5,180],fs=1000,order=2),margin=0)
+        else:
+            egm.find_windows(self.axes["bot"].ax,stiulation=self.cont[self.i][2]["CS1"].values,refference=self.cont[self.i][2]["V5"].values,margin=20)
+            reff=self.cont[self.i][2]["CS1"].values
+        
+        for ii in range(len(egm.stim_start)):
+            dont_save=False
+            A=Area(self,ind=ii)
+            start=egm.stim_start[ii]
+            end=egm.stim_start[ii]+egm.stim_duration[ii]
+            xx=x[start+8:end-10]
+            yy=y2[start+8:end-10]
+            yy1=yy
+            x_Energy,y_low,y_high,y_total=self.Energy(ax,xx,yy,legends=addition)
+            if self.delta[self.to_index[self.i][self.j]]==0 or self.forcefull:
+                output=find_start(x_Energy,y_low,length=2,ax=ax,operation=None,Th=0.15,alpha=App.TH[0])
+                if output is not None:
+                    start_n=int(start+8+output[0])
+                    end_n=int(start+8+output[1])
                 else:
-                    raise Exception("Pnumbers didnt coincide fall back to processing again")
-                stims=dict.get("stim")
-                sinus=dict.get("sinus")
-                ii=0
-                for s in stims:
-                    if s is not None:
-                        if plot:
-                            
-                            start_n,end_n=s
-                            t0_s = start_n * 0.001
-                            t1_s = end_n   * 0.001
-                            xx=x[start_n:end_n]
-                            yy1=y2[start_n:end_n]
-                            A = Area(
-                                app=self,
-                                index=ii,          # <- same meaning as your old ind
-                                key="stim",       # <- where it lives / your label
-                                kind="stim",      # <- delta dict key to update on release
-                                t0_s=t0_s,
-                                t1_s=t1_s,
-                                color="#7DAD76",
-                                fs_hz=1000.0
-                            )
-                            ii+=1
-                            A.attach(ax)           # <- creates artists + connects pick/follow/release + right-click menu on THIS ax canvas
-                            Areas.append(A)        # <- keep reference so you can update ylim later if needed
-                            ax.plot(xx,yy1 ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
-                ii=0
-                for s in sinus:
-                    if s is not None:
-                        if plot:
-                            start_n,end_n=s
-                            
-                            t0_s = start_n * 0.001
-                            t1_s = end_n   * 0.001
-                            xx=x[start_n:end_n]
-                            yy1=y2[start_n:end_n]
-                            A = Area(
-                                app=self,
-                                index=ii,          # <- same meaning as your old ind
-                                key="sinus",       # <- where it lives / your label
-                                kind="sinus",      # <- delta dict key to update on release
-                                t0_s=t0_s,
-                                t1_s=t1_s,
-                                color="#A776AD",
-                                fs_hz=1000.0
-                            )
-                            ii+=1
-                            A.attach(ax)           # <- creates artists + connects pick/follow/release + right-click menu on THIS ax canvas
-                            Areas.append(A)        # <- keep reference so you can update ylim later if needed
-                            ax.plot(xx,yy1 ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
-                            
-
-            except Exception as e:
-                print(e)
-                raise Exception("memory failed")
-
-        except Exception as e:
-            print(e)
-            print("data not loaded proceed to analyze the data")
-
-            egm=Triple_Extra(t=x,EGM=y2)
-            try:
-                egm.find_windows(self.axes["bot"],stiulation=stim_reff,refference=ECG_reff,margin=0)
-            except Exception as e:
-                raise e
-            ii=0
-            for i_temp,_ in enumerate(egm.stim_start):
-                detected=False
-                start=egm.stim_start[i_temp]+5
-                end=egm.stim_start[i_temp] +egm.stim_duration[i_temp]-10
-                xx=x[start:end]
-                yy=y2[start:end]
-                yy1=yy.copy()
-                checkbox:tk.IntVar=self.check_boxes.get("Energy")
-                if checkbox.get():
-                    output=find_start(app=self,x_woi=xx,y_woi=yy,length=2,ax=ax,operation=None,Th=0.15,alpha=self.TH[0])
+                    start_n=start
+                    end_n=end
+                    dont_save=True
+            else:
+                memory=self.delta[self.to_index[self.i][self.j]][2]["stim"][ii]
+                if isinstance(memory,list) and len(memory)==2 :
+                    start_n,end_n=memory
                 else:
-                    output=find_start(app=self,x_woi=xx,y_woi=yy,length=2,ax=None,operation=None,Th=0.15,alpha=self.TH[0])
+                    start_n=start
+                    end_n=end
+                    dont_save=True
 
+            xx=x[start_n:end_n]
+            yy=y2[start_n:end_n]
+            if yy1.max()-yy1.min()>0.05 and not dont_save:
+                defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n)
+                defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n,inverse=True)
+                A.add_area(np.array([start_n,end_n]),ylim=ax_object.ylim,xlim=ax_object.xlim,color="green")
+                A.plot_area(ax)
+                self.Areas[arg].append(A)
+                self.canvas.mpl_connect('pick_event', A.clickonline)
+                ax.plot(xx,yy ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
+                c1["refs_stim"].append(egm.stim_ref[ii])
+                c1["stim"].append([start_n,end_n])
+                c1["voltage_stim"].append(yy1.max()-yy1.min())
+                c1["deflection_stim"].append(defl)
+            elif dont_save:
+                c1["refs_stim"].append(egm.stim_ref[ii])
+                c1["stim"].append(False)
+                c1["voltage_stim"].append(False)
+                c1["deflection_stim"].append(False)
+            else:
+                c1["refs_stim"].append(egm.stim_ref[ii])
+                c1["stim"].append([start_n,end_n])
+                c1["voltage_stim"].append(yy1.max()-yy1.min())
+                c1["deflection_stim"].append(False)
+
+            
+        for ii in range(len(egm.sinus_start)):
+            dont_save=False
+            start=egm.sinus_start[ii]
+            end=egm.sinus_start[ii]+egm.sinus_duration[ii]
+            if egm.stim_start[0]<start<egm.stim_start[-1]+egm.stim_duration[-1]:
+                start=egm.stim_start[-1]+egm.stim_duration[-1]
+                if end-start<100:
+                    continue
+            A=Area(self,ind=ii)
+            
+            xx=x[start:end]
+            yy=y2[start:end]
+            yy1=yy
+            x_Energy,y_low,y_high,y_total=self.Energy(ax,xx,yy,legends=addition)
+            if self.delta[self.to_index[self.i][self.j]] == 0 or self.forcefull:
+                output=find_start(x_Energy,y_low,length=2,ax=ax,operation=None,Th=0.15,alpha=App.TH[0])
                 if output is not None:
                     start_n=int(start+output[0])
                     end_n=int(start+output[1])
-                    detected=True
                 else:
-                    pass
-
-                if detected:
-                    
-                    xx=x[start_n:end_n]
-                    yy1=y2[start_n:end_n]
-                    if plot:
-                        t0_s = start_n * 0.001
-                        t1_s = end_n   * 0.001
-
-                        A = Area(
-                            app=self,
-                            index=ii,          # <- same meaning as your old ind
-                            key="stim",       # <- where it lives / your label
-                            kind="stim",      # <- delta dict key to update on release
-                            t0_s=t0_s,
-                            t1_s=t1_s,
-                            color="#76AD85",
-                            fs_hz=1000.0
-                        )
-                        ii+=1
-                        A.attach(ax)           # <- creates artists + connects pick/follow/release + right-click menu on THIS ax canvas
-                        Areas.append(A)        # <- keep reference so you can update ylim later if needed
-
-                        ax.plot(xx,yy1 ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
-                        defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n)
-                        defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n,inverse=True)
+                    start_n=start
+                    end_n=end
+                    dont_save=True
+            else:
+                try:
+                    memory=self.delta[self.to_index[self.i][self.j]][2]["sinus"][ii]
+                    if isinstance(memory,list) and len(memory)==2 :
+                        start_n,end_n=memory
                     else:
-                        defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),None,start_n,end_n)
-                        defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),None,start_n,end_n,inverse=True)  
-                    c1["refs_stim"].append(egm.stim_ref[i_temp])
-                    c1["stim"].append([start_n,end_n])
-                    c1["voltage_stim"].append(yy1.max()-yy1.min())
-                    c1["deflection_stim"].append(defl)
-                else:
-                    c1["refs_stim"].append(egm.stim_ref[i_temp])
-                    c1["stim"].append(None)
-                    c1["voltage_stim"].append(None)
-                    c1["deflection_stim"].append(None)
-                    
+                        start_n=start
+                        end_n=end
+                        dont_save=True
+                except:
+                    continue
 
-            ii=0    
-            for i_temp,_ in enumerate(egm.sinus_start):
-                detected=False
-                start=egm.sinus_start[i_temp]
-                end=egm.sinus_start[i_temp]+egm.sinus_duration[i_temp]
-                xx=x[start:end]
-                yy=y2[start:end]
-                yy1=yy.copy()
-                checkbox:tk.IntVar=self.check_boxes.get("Energy")
-                if checkbox.get():
-                    output=find_start(app=self,x_woi=xx,y_woi=yy,length=2,ax=ax,operation=None,Th=0.15,alpha=self.TH[0])
-                else:
-                    output=find_start(app=self,x_woi=xx,y_woi=yy,length=2,ax=None,operation=None,Th=0.15,alpha=self.TH[0])
-                if output is not None:
-                    start_n=int(start+output[0])
-                    end_n=int(start+output[1])
-                    detected=True
-                else:
-                    pass
 
-                if detected:
-                    
-                    xx=x[start_n:end_n]
-                    yy1=y2[start_n:end_n]
-                    if plot:
-                        # start_n/end_n are samples -> convert to seconds (fs=1000 like your code)
-                        t0_s = start_n * 0.001
-                        t1_s = end_n   * 0.001
+            xx=x[start_n:end_n]
+            yy=y2[start_n:end_n]
+            if yy1.max()-yy1.min()>0.05 and not dont_save:
+                # argument value that is the duration to be shaded must be in numpy array format
+                defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n)
+                defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n,inverse=True)
+                A.add_area(np.array([start_n,end_n]),ylim=ax_object.ylim,xlim=ax_object.xlim,color="#A776AD")
+                A.plot_area(ax)
+                self.Areas[arg].append(A)
+                self.canvas.mpl_connect('pick_event', A.clickonline)
+                
+                ax.plot(xx,yy ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
+        
+                c1["refs_sinus"].append(egm.sinus_ref[ii])
+                c1["sinus"].append([start_n,end_n])
+                c1["voltage_sinus"].append(yy1.max()-yy1.min())
+                c1["deflection_sinus"].append(defl)
+            elif dont_save:
+                c1["refs_sinus"].append(egm.sinus_ref[ii])
+                c1["sinus"].append(False)
+                c1["voltage_sinus"].append(False)
+                c1["deflection_sinus"].append(False)
+            else:
+                c1["refs_sinus"].append(egm.sinus_ref[ii])
+                c1["sinus"].append([start_n,end_n])
+                c1["voltage_sinus"].append(yy1.max()-yy1.min())
+                c1["deflection_sinus"].append(False)
 
-                        A = Area(
-                            app=self,
-                            index=ii,          # <- same meaning as your old ind
-                            key="sinus",       # <- where it lives / your label
-                            kind="sinus",      # <- delta dict key to update on release
-                            t0_s=t0_s,
-                            t1_s=t1_s,
-                            color="#A776AD",
-                            fs_hz=1000.0
-                        )
-                        ii+=1
-                        A.attach(ax)           # <- creates artists + connects pick/follow/release + right-click menu on THIS ax canvas
-                        Areas.append(A)        # <- keep reference so you can update ylim later if needed
-                        ax.plot(xx,yy1 ,label=f"duration: {end_n-start_n} ms",linewidth=0.6)
-                        defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n)
-                        defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),ax,start_n,end_n,inverse=True)
-                    else:
-                        defl=deflection(butter_bandpass_filter(y2,(2,250),order=2),None,start_n,end_n)
-                        defl+=deflection(-butter_bandpass_filter(y2,(2,250),order=2),None,start_n,end_n,inverse=True)  
-                    c1["refs_sinus"].append(egm.sinus_ref[i_temp])
-                    c1["sinus"].append([start_n,end_n])
-                    c1["voltage_sinus"].append(yy1.max()-yy1.min())
-                    c1["deflection_sinus"].append(defl)
-                else:
-                    c1["refs_sinus"].append(egm.sinus_ref[i_temp])
-                    c1["sinus"].append(None)
-                    c1["voltage_sinus"].append(None)
-                    c1["deflection_sinus"].append(None)
-                    
-            idx=self.to_index[self.i][self.j]
-            self.delta[idx] = [str(p_number), label, c1]       
-            tv = self.table.tree  # EditableTree
-            row = self.to_index[self.i][self.j]
-            iid = f"row{row}"
 
-            vals = list(tv.item(iid)["values"])
-            vals[-1] = ", ".join(
-                f"{k}: {', '.join(map(str, v))}"
-                for k, v in c1.items()
-                if "voltage" not in k
-            )
-            tv.item(iid, values=vals)
+        self.delta[self.to_index[self.i][self.j]]=[self.cont[self.i][0]["point number"].values[self.j],self.cont[self.i][0]["label_color"].values[self.j],c1]     
+        tv = self.table.tree  # EditableTree
+        row = self.to_index[self.i][self.j]
+        iid = f"row{row}"
 
-        ax.set_title(label)
+        vals = list(tv.item(iid)["values"])
+        vals[-1] = ", ".join(
+            f"{k}: {', '.join(map(str, v))}"
+            for k, v in c1.items()
+            if "voltage" not in k
+        )
+        tv.item(iid, values=vals)   
+        
+        
+                
 
-    def plot(self,plot=True):
+        #if len(y2[arg[0]:arg[1]])!=0:
+        #    indexes=find_peaks(y2[self.arg[arg][0]:self.arg[arg][1]],prominence=y2[self.arg[arg][0]:self.arg[arg][1]].max()*0.15,height=y2[self.arg[arg][0]:self.arg[arg][1]].max()*0.2,distance=5)
+        #    ax.scatter((indexes[0]+self.arg[arg][0])*0.001,y2[indexes[0]+self.arg[arg][0]],s=2,color="black")
+    
+        ax.set_title(self.cont[self.i][0]["label_color"].values[self.j])
+        self.create_legend(leg=ax.get_legend_handles_labels(),canvas=self.ccs[ax_object.key],addition=addition)
+        #ax.legend(fontsize=8)
+        ax_object.set()
+        
+
+    def plot(self):
         print(self.i,self.j)
+        #manual legend ? cleanup; cleaning all canvas that were created in init and then stored in self.ccs as canvases.
+        [cc.delete("all") for cc in self.ccs.values()]
 
         # getting key value of my ax class which is up mid as middle or bot as bottom. the purpose of this line of code is to have a new object for shading areas each time we update.
-        self.Areas={key:{} for key in ["top","down"]}
+        self.Areas={i.key:[] for i in self.axes.values()}
         
         # load the data
-        car:pd.DataFrame=self.cont[self.i][0]
-        tag=self.cont[self.i][1]
-        print("tag is",tag)
         data_pd=self.cont[self.i][2]
         x=data_pd.index
-        y2=data_pd.loc[:,car.iat[self.j, car.columns.get_loc("bipolar")]].values
+        car=self.cont[self.i][0]
+        y2=data_pd.loc[:,car.loc[self.j,"bipolar"]].values
         V5=data_pd.loc[:,"V5"].values
-        #V5=butter_bandpass_filter(data=V5,cutoff=[5,180],fs=1000,order=2)
+        V5=butter_bandpass_filter(data=V5,cutoff=[5,180],fs=1000,order=2)
         try:
-            M=[data_pd.loc[:,ii].values for ii in ["M1","M2"]]
-            M=M[1]-M[0]
-            #M=M[1]
+            M=[data_pd.loc[:,ii].values for ii in ["M4","M3"]]
+            #M=M[1]-M[0]
+            M=M[1]
         except Exception as e:
+            #traceback.print_exc()
+            pass
+        try:
+            M=data_pd.loc[:,"CS1"].values 
+        except Exception as e:
+            #traceback.print_exc()
             pass
 
+        
+
+        # this loop is for when the Only green check box is activated, it will checks the labels untill one of the labels in the list will show up. otherwise it will continue searching. 
+        if self.check_boxes["Only_Green"].get() and not np.isin(self.cont[self.i][0].values[self.j][0].upper(),["VERDE","VER","GREEN","POSITIVE","POS"]) :
+            if self.direction>=0:
+                self.p_increase()
+                return
+            else:
+                self.p_decrease()
+                return
+
+        # make another pointer to the axes dictionary for easing of access
+        axes=self.axes
+
+        
+        
 
         # check if the protocol is needed
         if self.triple_active:
-            ax=self.axes["top"]
-            self.plot_main(ax,x=x,y2=y2,ECG_reff=V5,stim_reff=M,plot=plot)
-
+            ax=axes["top"]
+            self.plot_main(ax,x=x,y2=y2,arg=ax.key,reff=M)
+            #ax=axes["mid"]
+            #self.plot_main(ax,x=x,y2=y2,arg=ax.key,reff=M)
 
         # default mode for all kinds of signals.   
         else:
             
-            ax=self.axes["top"]
-            ax.plot(x,y2,alpha=0.5,linewidth=0.6)
-            ax.set_title(car.iat[self.j,car.columns.get_loc("label_color")])
+            ax=axes["top"]
+            ax.ax.plot(x,y2,alpha=0.5,linewidth=0.6)
+            ax.ax.set_title(car.loc[self.j,"label_color"])
+            ax.set()
+            
+        # plotting refferences
+        ax1_object=axes["bot"]
+        ax1=ax1_object.ax
 
-        if plot:
-            # plotting refferences
-            ax1=self.axes["bot"]
-            Point_test=find_peaks(V5,0.5)
-            ax1.plot(x,V5,label="V5",alpha=1)
-            try:
-                ax1.plot(x,M,label="M",alpha=1)
-            except Exception as e:
-                traceback.print_exc()
-            ax1.grid(True)
-            ax1.scatter(Point_test[0]*0.001,V5[Point_test[0]])          
-            self.update()
-        return True
         
-    def update_plot(self,forcefull=False,plot=True):
+        Point_test=find_peaks(V5,0.5)
+        ax1.plot(x,V5,label="V5",alpha=1)
+        #ax1.plot(x,y2,label="y2",alpha=0.7)
+        try:
+            ax1.plot(x,M,label="M",alpha=1)
+        except Exception as e:
+            traceback.print_exc()
+        ax1.grid(True)
+        ax1.scatter(Point_test[0]*0.001,V5[Point_test[0]])
+
+        #Point_test=find_peaks(M,2)
+        #ax1.scatter(Point_test[0]*0.001,M[Point_test[0]])
+        ax1_object.set()
+        
+        self.create_legend(leg=ax1.get_legend_handles_labels(),canvas=self.ccs[ax1_object.key])
+        #plt.savefig(r"C:\Users\cardio\Desktop\Output case 1 26_7_2024\out_{i}_{x}_{j}.jpeg".format(j=j_,x=cont[i_][1][:-4],i=i_))
+        self.canvas.draw_idle()
+        self.update()
+        
+            
+     
+    
+    def select(self,event):
+        i,j=self.to_i_j[event[0]]
+        print("selected row with select binding function",event[0])
+        self.i=i
+        self.j=j
+        self.update_plot()
+
+    
+       
+    def update_plot(self,forcefull=False):
         if forcefull:
             self.forcefull=True
         else:
             self.forcefull=False
-        if plot:
-            for ax in self.axes.values():
-                xlim = ax.get_xlim()
-                ylim = ax.get_ylim()
-
-                ax.cla()
-
-                ax.set_xlim(xlim)
-                ax.set_ylim(ylim)
-                ax.set_autoscale_on(False)
-                ax.set_autoscalex_on(False)
-                ax.set_autoscaley_on(False)
-
+        for i in self.axes.values():
+            i.ax.clear()
+        self.plot()
+        self.label.config(text=f"point {self.cont[self.i][0].reset_index(drop=True)['point number'][self.j]}")
+        self.canvas.draw()
         print("current index",self.to_index[self.i][self.j])
-        self.plot(plot=plot)
-
-        car:pd.DataFrame  
-        car=self.cont[self.i][0]
-        self.label.config(text=f"point {car.iat[self.j,car.columns.get_loc('point number')]}")
         self.table.tree.see(f"row{self.to_index[self.i][self.j]}")
         self.table.tree.selection_set(f"row{self.to_index[self.i][self.j]}")
         self.table.tree.focus(f"row{self.to_index[self.i][self.j]}")
         self.table.tree.cur_iid = f"row{self.to_index[self.i][self.j]}"
         self.update()
-        self.canvas.draw_idle()
-
-    def compute_all(self):
-        for i in range(len(self.to_i_j)):
-            self.i,self.j=self.to_i_j[i]
-            try:    
-                self.update_plot(forcefull=True,plot=False)
-                self.forcefull=False
-            except Exception as e:
-                print(e)
-                continue
 
     def p_increase(self,event=None):
         self.direction=1
@@ -784,7 +689,8 @@ class App(tk.Tk):
         if event:
             self.j=0
             self.update_plot()
-    
+
+
     def s_decrease(self,event=None):
         self.direction=-1
         
@@ -797,7 +703,6 @@ class App(tk.Tk):
         if event:
             self.j=0
             self.update_plot()
-    
     def drop_down(self):
         menu=tk.Menu(master=self.frame1,tearoff=False)
         def convert(obj):
@@ -844,13 +749,17 @@ class App(tk.Tk):
                 except Exception as e:
                     traceback.print_exc()
                     in_table.append("")
-
-
+            print(in_table)
+            print(labels)
             self.Table["delta"]=pd.Series(in_table)
             self.Table["label_color"]=pd.Series(labels)
 
             self.table.tree.init_from_df(self.Table)
-
+            self.table.tree.bind_native("<Button-1>",self.select)
+            self.table.tree.bind_native("<Return>",self.on_enter)
+            self.table.tree.bind("<Up>")
+            self.table.tree.bind("<Up>", self._on_key_nav, add="+")
+            self.table.tree.bind("<Down>", self._on_key_nav, add="+")
         def _toplevel():
             top_window=tk.Toplevel()
             top_window.attributes("-topmost", True)
@@ -859,40 +768,30 @@ class App(tk.Tk):
         menu.add_command(label="Load_Delta",command=load)
         menu.add_command(label="meta_parameters",command=_toplevel)
         menu.tk_popup(self.button_dropdown.winfo_rootx(),self.button_dropdown.winfo_rooty()+self.button_dropdown.winfo_height())
-    
+    def create_legend(self,leg,canvas,addition=None):
+        if isinstance(addition,type(None)):
+            leg=np.vstack([[ii.get_color() for ii in leg[0]],leg[1]]).T
+            
+        else:
+            leg=np.vstack([[ii.get_color() for ii in leg[0]],leg[1]]).T
+            leg=np.concatenate([leg,np.vstack(addition)],0)
+            #print(leg)
+        for xx,m in enumerate(leg):
+            
+            canvas.create_text(50,20+20*xx,text=m[1])
+            canvas.create_line(100,20+20*xx,150,20+20*xx,fill=m[0])
+            canvas.create_line(0,10+20*xx,150,10+20*xx,fill="black")
+        canvas.create_line(0,10+20*len(leg),150,10+20*len(leg),fill="black")
     def Energy(self,ax,x,y,legends=None):   
         #stft_=librosa.stft(y,n_fft=100,hop_length=1,win_length=35,window="hann",center=True)
         #Xdb_=np.abs(stft_)
-        freqs,time,mags=librosa.reassigned_spectrogram(y,n_fft=int(self.win_length[0]),hop_length=int(self.hop_length[0]),win_length=int(self.win_length[0]),window="hann",center=True,sr=1000)
-        #print(freqs,time)
-        time=time.flatten()+x.min()
-        freqs=freqs.flatten()
-        from scipy.stats import binned_statistic_2d
-        #print(x.min(),x.max())
-        time_bins = np.linspace(x.min(), x.max(), int((x.max()-x.min())/0.001) + 1)
+        freqs,time,mags=librosa.reassigned_spectrogram(y,n_fft=int(App.win_length[0])+25,hop_length=int(App.hop_length[0]),win_length=int(App.win_length[0]),window="hann",center=True)
 
-        freq_bins = np.linspace(0, 500, mags.shape[0])
         Xdb_=mags
-        #print(time_bins,time)
-        magnitude=np.abs(mags.flatten())
-        H_count, _, _, _ = binned_statistic_2d(
-            time, freqs, magnitude,
-            statistic='count', bins=[time_bins, freq_bins]
-        )
-        mask=H_count == 0
-        H_count[mask]=1
-        H_sum, _, _, _ = binned_statistic_2d(
-            time, freqs, magnitude,
-            statistic='sum', bins=[time_bins, freq_bins]
-        )
-        H_sum=H_sum/H_count
 
-
-        Xdb_=H_sum.T
-        #print(Xdb_.shape,Xdb_)
         freq=Xdb_.shape[0]
-        len_han=int(self.len_hann[0])
-        y__=np.mean(Xdb_[freq//5:,:],0)
+        len_han=int(App.len_hann[0])
+        y__=np.sum(Xdb_[freq//5:,:],0)/Xdb_.shape[0]
         
         window=np.ones(len_han)
         #y__=minmax_scale(y__, feature_range=(0, 1), axis=0, copy=True)
@@ -900,11 +799,11 @@ class App(tk.Tk):
         x=np.linspace(x.min(),x.max(),len(y_high))
 
         #y__=np.sum(Xdb_[1:freq//2,:],0)/Xdb_.shape[0]
-        y__=np.mean(Xdb_[int(freq*self.low_b0[0]/500):int(freq*self.low_b1[0]/500),:],0)
+        y__=np.sum(Xdb_[int(freq*App.low_b0[0]/500):int(freq*App.low_b1[0]/500),:],0)/Xdb_.shape[0]
         #y__=minmax_scale(y__, feature_range=(0, 1), axis=0, copy=True)
                 
         y_low=np.convolve(y__,window,mode="same")/np.sum(window)
-        y__=np.mean(Xdb_[:,:],0)
+        y__=np.sum(Xdb_[:,:],0)/Xdb_.shape[0]
         #y__=minmax_scale(y__, feature_range=(0, 1), axis=0, copy=True)
         y_total=np.convolve(y__,window,mode="same")/np.sum(window)
         for key,state in self.check_boxes.items():
@@ -919,29 +818,22 @@ class App(tk.Tk):
                 
                 
                 if legends is None:
-                    ax.plot(x,y_total,color="#FFc5c5")
+                    ax.plot(x,y_low,color="#FFc5c5")
                 else:
-                    ax.plot(x,y_total,color=legends[1][0])
-        x_E=x
-        return x_E,y_low,y_high,y_total
+                    ax.plot(x,y_low,color=legends[1][0])
+
+        return [x,y_low,y_high,y_total]
 
 
-
-
-
-
-
-
+ 
 def deflection(y,ax,start,end,inverse=False):
     signal=y[start:end]
     if len(signal)!=0:
         indexes=find_peaks(y[start:end],prominence=signal.max()*0.15,height=signal.max()*0.2,distance=5)
         if inverse:
-            if ax:
-                ax.scatter((indexes[0]+start)*0.001,-signal[indexes[0]],s=2,color="black")
+            ax.scatter((indexes[0]+start)*0.001,-signal[indexes[0]],s=2,color="black")
         else:
-            if ax:
-                ax.scatter((indexes[0]+start)*0.001,signal[indexes[0]],s=2,color="black")
+            ax.scatter((indexes[0]+start)*0.001,signal[indexes[0]],s=2,color="black")
     return len(indexes[0])
 
     

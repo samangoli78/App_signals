@@ -18,38 +18,30 @@ class Triple_Extra():
     def find_windows(self,ax,stiulation,refference,margin=0):
         # units here is based on samples number
         stiulation=np.abs(stiulation)
-        P,dic=find_peaks(stiulation,distance=250,height=0.75*np.max(stiulation))
+        P,dic=find_peaks(stiulation,distance=200,height=0.3*np.max(stiulation))
         diff=[P[i+1]-P[i] for i in np.arange(len(P)-1)]
-        if ax:
-            ax.plot(P*0.001,dic["peak_heights"],"x")
+        ax.plot(P*0.001,dic["peak_heights"],"x")
         diff.append(diff[0]+28) 
         self.stim_start=P
         self.stim_ref=P
         self.stim_duration=diff
         refference=np.abs(refference)
-
-
-        P,dic=find_peaks(refference,distance=300,height=0.45*np.max(refference))
-        if ax:
-            ax.plot(P*0.001,dic["peak_heights"],"x")
-
-        sinus_ref=P
-        sinus_ref_new=[]
-        sinus_end=[]
-        sinus_start=[]
-        duration=225
-        for ii in sinus_ref:
-            start=ii-duration
-            end=ii+margin 
-            if 0<end<self.N and 0<start<self.N and (start<self.stim_start[0] or self.stim_start[-1]+self.stim_duration[-1]<start ):
-                sinus_ref_new.append(ii)
-                sinus_start.append(start)
-                sinus_end.append(end)
-
+        ref=refference[:self.stim_start[0]-20]
+        P1,dic=find_peaks(ref,distance=500,height=0.5*np.max(refference))
         
-        self.sinus_ref=sinus_ref_new
-        self.sinus_start=sinus_start
-        self.sinus_end=sinus_end
+        P1=P1
+        ax.plot(P1*0.001,dic["peak_heights"],"x")
+        ref=refference[self.stim_start[-1]+self.stim_duration[-1]:]
+        PP,dic=find_peaks(ref,distance=500,height=0.5*np.max(refference))
+        PP=PP+self.stim_start[-1]+self.stim_duration[-1]
+        ax.plot(PP*0.001,dic["peak_heights"],"x")
+        P1=np.hstack([P1,PP])
+        self.sinus_ref=P1
+        margin
+        sinus_end=[ii+margin if 0<ii+margin<self.N else ii for ii in P1 ]
+        duration=325
+        
+        self.sinus_start=[ii-duration  if 0<ii-duration else 0 for ii in sinus_end]
         self.sinus_duration=[duration]*len(self.sinus_start)
     
     def median_convolution(self,y,n=3):
