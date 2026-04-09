@@ -58,6 +58,14 @@ class Parser_carto:
         return [vertices, faces]
     
     def pars_mesh_file_with_electrode(self):
+        """
+        Docstring for pars_mesh_file_with_electrode
+        
+        :param self: Description
+        :type self: Type
+        :return: np.array(vertices), np.array(triangles), np.array(unipolar_values), np.array(bipolar_values),np.array(LAT_values)
+        :rtype: tuple of np.array
+        """
         vertices = []
         triangles = []
         unipolar_values = []

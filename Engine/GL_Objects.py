@@ -2,161 +2,85 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import numpy as np
 from OpenGL import GL
-from Geometry import make_uv_sphere_exploded
-from Shader import BEAUTY_VS, BEAUTY_FS, PICK_VS, PICK_FS
-from gl_backend import set_uniform_mat4, set_uniform_mat3, set_uniform_vec3, set_uniform_u1, link_program
+from .Geometry import make_uv_sphere_exploded
+from .Shader import BEAUTY_VS, BEAUTY_FS, PICK_VS, PICK_FS
+from .gl_backend import set_uniform_mat4, set_uniform_mat3, set_uniform_vec3, set_uniform_u1, link_program,vao
 
 if TYPE_CHECKING:
-    from Shader import ShaderPickSphere
+    from MVP import Three_D_Frame
 
 
 
-class bind:
-    def __init__(self,world:ShaderPickSphere,obj_id):
+
+class Object:
+    def __init__(self,world:Three_D_Frame,obj_id):
                 # Picking FBO (created on first draw / resize)
         self.world=world
-        self.pick_fbo = None
-        self.pick_tex_obj = None
-        self.pick_tex_face = None
-        self.pick_tex_bary = None
-        self.pick_depth = None
-        self._fb_w = 0
-        self._fb_h = 0
         self.object_id=obj_id
-    def bind(self,**kwargs):
+        self.pick_render_update=lambda : None
+        self.beauty_render_update=lambda : None
+        self.center=np.array([0,0,0],dtype=np.float32)
+        self.prog_pick = link_program(PICK_VS, PICK_FS)
+        def temp_function():
+            GL.glUseProgram(self.prog_pick)
+            w = max(1, self.world.winfo_width())
+            h = max(1, self.world.winfo_height())
+            eye, model, view, proj, mvp, normal_mat = self.world._matrices(w, h)
+            set_uniform_mat4(self.prog_pick, "uMVP", mvp)
+            set_uniform_u1(self.prog_pick, "uObjectId", self.object_id)
+        self.pick_render_update = temp_function
+
+    def bind_sphere_default(self,**kwargs):
         pos, nor, bary, face, num_faces = make_uv_sphere_exploded(**kwargs)
+        self.center=np.mean(pos, axis=0)
         self.vertex_count = pos.shape[0]
-
-        # VAO/VBOs
-        self.vao = GL.glGenVertexArrays(1)
-        GL.glBindVertexArray(self.vao)
-
-        self.vbo_pos = GL.glGenBuffers(1)
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_pos)
-        GL.glBufferData(GL.GL_ARRAY_BUFFER, pos.nbytes, pos, GL.GL_STATIC_DRAW)
-        GL.glEnableVertexAttribArray(0)
-        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
-
-        self.vbo_nor = GL.glGenBuffers(1)
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_nor)
-        GL.glBufferData(GL.GL_ARRAY_BUFFER, nor.nbytes, nor, GL.GL_STATIC_DRAW)
-        GL.glEnableVertexAttribArray(1)
-        GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
-
-        self.vbo_bary = GL.glGenBuffers(1)
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_bary)
-        GL.glBufferData(GL.GL_ARRAY_BUFFER, bary.nbytes, bary, GL.GL_STATIC_DRAW)
-        GL.glEnableVertexAttribArray(2)
-        GL.glVertexAttribPointer(2, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
-
-        self.vbo_face = GL.glGenBuffers(1)
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_face)
-        GL.glBufferData(GL.GL_ARRAY_BUFFER, face.nbytes, face, GL.GL_STATIC_DRAW)
-        GL.glEnableVertexAttribArray(3)
-        # integer attribute
-        GL.glVertexAttribIPointer(3, 1, GL.GL_UNSIGNED_INT, 0, None)
-
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-        GL.glBindVertexArray(0)
+        vao_id, vbos = vao([pos, nor, bary, face], layout="3f 3f 3f 1u")
+        self.vao = vao_id
+        self.pos_vbo, self.nor_vbo, self.bary_vbo, self.face_vbo = vbos
         # Shaders
         self.prog_beauty = link_program(BEAUTY_VS, BEAUTY_FS)
-        self.prog_pick = link_program(PICK_VS, PICK_FS)
+        
+
+        def temp_function():
+            GL.glUseProgram(self.prog_beauty)
+            w = max(1, self.world.winfo_width())
+            h = max(1, self.world.winfo_height())
+            eye, model, view, proj, mvp, normal_mat = self.world._matrices(w, h)
+            set_uniform_mat4(self.prog_beauty, "uMVP", mvp)
+            set_uniform_mat4(self.prog_beauty, "uModel", model)
+            set_uniform_mat3(self.prog_beauty, "uNormalMat", normal_mat)
+            set_uniform_vec3(self.prog_beauty, "uEyeW", eye)
+            set_uniform_vec3(self.prog_beauty, "uLightW", self.world.light_world)
+
+        self.beauty_render_update = temp_function
         return self
-    def _ensure_pick_fbo(self, w, h):
-        if self.pick_fbo is not None and self._fb_w == w and self._fb_h == h:
-            return
-
-        # delete old if exists
-        if self.pick_fbo is not None:
-            GL.glDeleteFramebuffers(1, [self.pick_fbo])
-            GL.glDeleteTextures([self.pick_tex_obj, self.pick_tex_face, self.pick_tex_bary])
-            GL.glDeleteRenderbuffers(1, [self.pick_depth])
-
-        self._fb_w, self._fb_h = w, h
-
-        self.pick_fbo = GL.glGenFramebuffers(1)
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.pick_fbo)
-
-        # Object ID texture: R32UI
-        self.pick_tex_obj = GL.glGenTextures(1)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, self.pick_tex_obj)
-        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_R32UI, w, h, 0, GL.GL_RED_INTEGER, GL.GL_UNSIGNED_INT, None)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
-        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, self.pick_tex_obj, 0)
-
-        # Face ID texture: R32UI
-        self.pick_tex_face = GL.glGenTextures(1)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, self.pick_tex_face)
-        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_R32UI, w, h, 0, GL.GL_RED_INTEGER, GL.GL_UNSIGNED_INT, None)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
-        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT1, GL.GL_TEXTURE_2D, self.pick_tex_face, 0)
-
-        # Barycentric: RG32F
-        self.pick_tex_bary = GL.glGenTextures(1)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, self.pick_tex_bary)
-        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RG32F, w, h, 0, GL.GL_RG, GL.GL_FLOAT, None)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
-        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT2, GL.GL_TEXTURE_2D, self.pick_tex_bary, 0)
-
-        # Depth buffer
-        self.pick_depth = GL.glGenRenderbuffers(1)
-        GL.glBindRenderbuffer(GL.GL_RENDERBUFFER, self.pick_depth)
-        GL.glRenderbufferStorage(GL.GL_RENDERBUFFER, GL.GL_DEPTH_COMPONENT24, w, h)
-        GL.glFramebufferRenderbuffer(GL.GL_FRAMEBUFFER, GL.GL_DEPTH_ATTACHMENT, GL.GL_RENDERBUFFER, self.pick_depth)
-
-        GL.glDrawBuffers(3, [GL.GL_COLOR_ATTACHMENT0, GL.GL_COLOR_ATTACHMENT1, GL.GL_COLOR_ATTACHMENT2])
-
-        status = GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)
-        if status != GL.GL_FRAMEBUFFER_COMPLETE:
-            raise RuntimeError(f"Pick FBO incomplete: 0x{status:X}")
-
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+    
+    def bind_custom(self,data:list[np.ndarray],VS:str,FS:str,beauty_render_update:function,layout:str="3f 3f 3f 1u",locs:list[int]|None=None):
+        vao_id, vbos = vao(data, layout=layout, locs=locs)
+        self.vao = vao_id
+        self.prog_beauty = link_program(VS, FS)
+        self.beauty_render_update = beauty_render_update
+        self.beauty_render_update=beauty_render_update
+        return self
+    
 
     # ---- rendering ----
-    def _render_pick_pass(self, w, h, eye, model, mvp):
-        self._ensure_pick_fbo(w, h)
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.pick_fbo)
-        GL.glViewport(0, 0, w, h)
-        GL.glDisable(GL.GL_BLEND)
-        GL.glEnable(GL.GL_DEPTH_TEST)
-
-        # clear: obj=0, face=0, bary=(0,0)
-        GL.glClearBufferuiv(GL.GL_COLOR, 0, np.array([0], dtype=np.uint32))
-        GL.glClearBufferuiv(GL.GL_COLOR, 1, np.array([0], dtype=np.uint32))
-        GL.glClearBufferfv(GL.GL_COLOR, 2, np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32))
-        GL.glClear(GL.GL_DEPTH_BUFFER_BIT)
-
+    def _render_pick_pass(self,mod=GL.GL_TRIANGLES):
+        
         GL.glUseProgram(self.prog_pick)
-        set_uniform_mat4(self.prog_pick, "uMVP", mvp)
-        set_uniform_u1(self.prog_pick, "uObjectId", self.object_id)
-
+        self.pick_render_update()  # allow caller to update any state before pick pass
         GL.glBindVertexArray(self.vao)
-        GL.glDrawArrays(GL.GL_TRIANGLES, 0, self.vertex_count)
+        GL.glDrawArrays(mod, 0, self.vertex_count)
         GL.glBindVertexArray(0)
         GL.glUseProgram(0)
 
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
 
-    def _render_beauty_pass(self, w, h, eye, model, mvp, normal_mat):
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
-        GL.glViewport(0, 0, w, h)
-        GL.glEnable(GL.GL_DEPTH_TEST)
-
-        # REMOVE THIS (it clears for every object!)
-        # GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
-
+    def _render_beauty_pass(self,mod=GL.GL_TRIANGLES):
+        # make sure to set program active befor calling the update function, so that uniform updates work
         GL.glUseProgram(self.prog_beauty)
-        set_uniform_mat4(self.prog_beauty, "uMVP", mvp)
-        set_uniform_mat4(self.prog_beauty, "uModel", model)
-        set_uniform_mat3(self.prog_beauty, "uNormalMat", normal_mat)
-        set_uniform_vec3(self.prog_beauty, "uEyeW", eye)
-        set_uniform_vec3(self.prog_beauty, "uLightW", self.world.light_world)
-
+        self.beauty_render_update()  # allow caller to update any state before beauty pass
         GL.glBindVertexArray(self.vao)
-        GL.glDrawArrays(GL.GL_TRIANGLES, 0, self.vertex_count)
+        GL.glDrawArrays(mod, 0, self.vertex_count)
         GL.glBindVertexArray(0)
         GL.glUseProgram(0)
 

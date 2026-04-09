@@ -308,6 +308,37 @@ class App(tk.Tk):
         super().destroy() 
 
     def on_right_click(self, event):
+        if event.button == 3:  # Right-click
+            ax = event.inaxes
+            if ax is None or event.xdata is None or event.ydata is None:
+                return
+            hold_ms = 250          # threshold: tweak
+            move_px = 4         # drag threshold in pixels
+            down=True
+            hold=False
+            start_x_y = (event.xdata, event.ydata)
+            old_x_y = (event.xdata, event.ydata)
+            cid_motion=None
+            cid_release=None
+            def on_motion(event):
+                nonlocal hold, down, cid_motion, cid_release,old_x_y
+                if not down:
+                    return
+                dx = abs(event.xdata - old_x_y[0])
+                dy = abs(event.ydata - old_x_y[1])
+                old_x_y = (event.xdata, event.ydata)
+                if dx>move_px or dy>move_px:
+                    hold=True
+                else:
+                    hold=False
+                dist = (dx ** 2 + dy ** 2) ** 0.5
+                if dist > move_px:
+                    down = False
+                return
+        
+            cid_motion  = self.canvas.mpl_connect("motion_notify_event", on_motion)
+            cid_release = self.canvas.mpl_connect("button_release_event", on_release)
+
         start_x_y = None
         end_x_y = None
         rect = None
@@ -390,10 +421,6 @@ class App(tk.Tk):
                 self.canvas.draw_idle()
                 self.update()
 
-        if event.button == 3:  # Right-click
-            ax = event.inaxes
-            if ax is None or event.xdata is None or event.ydata is None:
-                return
 
             selected_ax = ax
             start_x_y = [event.xdata, event.ydata]
@@ -401,6 +428,55 @@ class App(tk.Tk):
 
             follower = self.canvas.mpl_connect("motion_notify_event", on_right_follow_mouse)
             release_cid = self.canvas.mpl_connect("button_release_event", on_right_release)
+
+
+            selected_key = None
+            for key, a in self.axes.items():
+                if a is selected_ax:
+                    selected_key = key
+                    break  
+            options = ["stim", "sinus"]
+
+            var = tk.StringVar(value=options[0])   # selected value
+            parent=self.canvas.get_tk_widget()
+            combo = ttk.Combobox(
+                parent,
+                textvariable=var,
+                values=options,
+                state="readonly"    # user must choose from list
+            )
+            x = event.guiEvent.x_root - parent.winfo_rootx()
+            y = event.guiEvent.y_root - parent.winfo_rooty()
+            combo.place(x=x, y=y)
+            on_plot_x=event.xdata
+            def on_selected(event):
+                nonlocal selected_key,on_plot_x
+                value = var.get()
+                print("Selected:", value, selected_key)
+                combo.destroy()
+                start_x=on_plot_x
+                end_x=on_plot_x+50/1000 # 50 ms window
+                if selected_key is not None:
+                    A = Area(
+                        app=self,
+                        index=len(self.Areas[selected_key]),          # <- same meaning as your old ind
+                        key=value,       # <- where it lives / your label
+                        kind=value,      # <- delta dict key to update on release
+                        t0_s=start_x,
+                        t1_s=end_x,
+                        color="#7DAD76" if value=="stim" else "#A776AD",
+                        fs_hz=1000.0
+                    )
+                    A.attach(selected_ax)           # <- creates artists + connects pick/follow/release + right-click menu on THIS ax canvas
+                    self.Areas[selected_key].append(A)        # <- keep reference so you can update ylim later if needed
+                    self.canvas.draw_idle()
+                    selected_key=None
+                else:
+                    combo.destroy() 
+                    self.canvas.draw_idle()
+
+            combo.bind("<<ComboboxSelected>>", on_selected)
+
             
     def on_scroll(self, event):
         ax = event.inaxes
