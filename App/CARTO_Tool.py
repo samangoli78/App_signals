@@ -140,14 +140,14 @@ class Carto(Parser_carto):
         new_labels=[]
         for i,m in enumerate(labels) :
             if np.isin(m,list(self.color_dict.keys())): 
-                new_labels.append([self.color_dict[m], data[i,2],data[i,27],data[i,4],data[i,5],data[i,6]])
+                new_labels.append([self.color_dict[m], data[i,2],data[i,4],data[i,5],data[i,6]])
             else: 
                 pass
         if len(new_labels)==0:
             return None
         return pd.DataFrame(
             np.array(new_labels),
-            columns=["label_color","point number","sample","x","y","z"]
+            columns=["label_color","point number","x","y","z"]
             )
     
     def electrodes(self,triple=False):
@@ -173,7 +173,7 @@ class Carto(Parser_carto):
             c4=pd.Series(refference,name="refference_chanel")
             return pd.concat(
                 [
-                    car[["label_color","sample","point number"]],
+                    car[["label_color","point number"]],
                     c2,
                     c3,
                     car[["x","y","z"]],
@@ -187,23 +187,29 @@ class Carto(Parser_carto):
         data=self.electrodes(triple)
         
         #check to delete Nan values from the data frame
-        for i in data.columns:
-            data=data.drop(data[data[i].isnull()].index)
+        #for i in data.columns:
+        #    data=data.drop(data[data[i].isnull()].index)
         content=[]
         t=0
         indexes=np.linspace(0,2.5, 2500)
-        for i in np.unique(data["file_number"].values):
+        for idx,row in data.iterrows():
+            fname=row["file_number"]
             t=time.time()
-            with open(os.path.join(self.path,i), "r", encoding="utf-8") as f:
+            with open(os.path.join(self.path,fname), "r", encoding="utf-8") as f:
                 _=f.readline()                                # line 0 (unused)
-                gain_line = f.readline().strip()            # line 1
+                gain_line = f.readline().strip()  
+                port_data = f.readline().split()
+                vals = [port_data[2].split("=")[-1], port_data[5].split("=")[-1], port_data[7].split("=")[-1]]
+                data.iat[idx,data.columns.get_loc("unipolar")]=vals[0]
+                data.iat[idx,data.columns.get_loc("bipolar")]=vals[1]
+                data.iat[idx,data.columns.get_loc("refference_chanel")]=vals[2]
                 header_line = f.readline().strip()          # line 2
             gain = float(gain_line.split("=")[-1])
             cols = [m.split("(")[0] for m in header_line.split()]  # strip "(...)" suffixes
 
             df = pd.read_csv(
-                os.path.join(self.path,i),
-                skiprows=3,
+                os.path.join(self.path,fname),
+                skiprows=4,
                 sep=r"\s+",             # <- instead of delim_whitespace=True
                 names=cols,
                 dtype=np.float32,
@@ -218,9 +224,10 @@ class Carto(Parser_carto):
             df.index = indexes
 
 
-            content.append([data.loc[data["file_number"] == i, :].reset_index(drop=True),i,df])
+            content.append([data.loc[data["file_number"] == fname, :].reset_index(drop=True),fname,df])
             print(time.time()-t)
         self.cont=content
+        print(data)
         return content
     
     def  create_output(self,content:list):
