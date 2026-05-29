@@ -1,0 +1,4 @@
+# Optional: VTK Python bindings used elsewhere in the project (e.g. carto parsing).
+# The 3D viewer “Export VTK…” button writes legacy ASCII polydata itself
+# (DataFile Version 4.1 style) and does not require this package.
+vtk>=9.4.0,<10

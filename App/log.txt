@@ -1,7 +1,11 @@
 could not initialize 
 choose your file from the dialogue
+<<<<<<< Updated upstream
 path is C:/Users/saman/Downloads/P009
 the map_data is a list and contains [{'Name': '1-AF_PsAF', 'Index': '455', 'Visible': 'true', 'Type': '', 'NumFiles': '1', 'FileNames': '1-AF_PsAF.mesh', 'Volume': '206.786', 'ChamberOfInterest': 'Left Atrium'}, {'Name': '1-1-SR_PsAF', 'Index': '456', 'Visible': 'false', 'Type': '', 'NumFiles': '1', 'FileNames': '1-1-SR_PsAF.mesh', 'Volume': '205.271', 'ChamberOfInterest': 'Left Atrium'}, {'Name': '1-1-1-NO', 'Index': '457', 'Visible': 'false', 'Type': '', 'NumFiles': '1', 'FileNames': '1-1-1-NO.mesh', 'Volume': '205.271', 'ChamberOfInterest': 'Left Atrium'}, {'Name': '1-1-2-SR_PsAF_3Extra', 'Index': '458', 'Visible': 'false', 'Type': '', 'NumFiles': '1', 'FileNames': '1-1-2-SR_PsAF_3Extra.mesh', 'Volume': '203.873', 'ChamberOfInterest': 'Left Atrium'}, {'Name': '1-1-2-1-NO', 'Index': '459', 'Visible': 'false', 'Type': '', 'NumFiles': '1', 'FileNames': '1-1-2-1-NO.mesh', 'Volume': '200.564', 'ChamberOfInterest': 'Left Atrium'}, {'Name': '1-1-2-1-1-NO', 'Index': '460', 'Visible': 'false', 'Type': '', 'NumFiles': '1', 'FileNames': '1-1-2-1-1-NO.mesh', 'Volume': '197.967', 'ChamberOfInterest': 'Left Atrium'}, {'Name': '2-AD-SR', 'Index': '461', 'Visible': 'false', 'Type': '', 'NumFiles': '1', 'FileNames': '2-AD-SR.mesh', 'Volume': '285.213', 'ChamberOfInterest': 'Left Atrium'}, {'Name': '2-1-ReAD-SR', 'Index': '462', 'Visible': 'false', 'Type': '', 'NumFiles': '1', 'FileNames': '2-1-ReAD-SR.mesh', 'Volume': '285.213', 'ChamberOfInterest': 'Left Atrium'}] 
 {0: '1-AF_PsAF', 1: '1-1-SR_PsAF', 2: '1-1-1-NO', 3: '1-1-2-SR_PsAF_3Extra', 4: '1-1-2-1-NO', 5: '1-1-2-1-1-NO', 6: '2-AD-SR', 7: '2-1-ReAD-SR'}
 choose your file with its index passing to set_cat_value methodoptions: 
 1-1-2-SR_PsAF_3Extra3this map has been selected
+=======
+path is C:/Users/saman/Downloads/P010
+>>>>>>> Stashed changes
