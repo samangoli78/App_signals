@@ -65,6 +65,57 @@ def per_face_gradient(V: np.ndarray, F: np.ndarray, t: np.ndarray) -> np.ndarray
     return grad
 
 
+def vertex_gradient_magnitude(
+    V: np.ndarray,
+    F: np.ndarray,
+    scalar_per_vertex: np.ndarray,
+) -> np.ndarray:
+    """Per-vertex spatial gradient magnitude ``|grad scalar|``.
+
+    Computes the per-face gradient of ``scalar_per_vertex`` and projects
+    it to vertices with the standard area-weighted (1/3 lumped-mass)
+    average, then returns the Euclidean norm at each vertex. Vertices
+    with no usable incident face (all-NaN 1-ring, isolated vertex, ...)
+    are returned as NaN.
+
+    Units are ``[scalar] / [V]`` (e.g. mV/mm when ``scalar`` is the
+    interpolated unipolar field in mV and ``V`` is in mm), i.e. the
+    spatial ``dV/ds`` magnitude along the surface.
+    """
+    V = np.asarray(V, dtype=np.float64)
+    F = np.asarray(F, dtype=np.int64)
+    s = np.asarray(scalar_per_vertex, dtype=np.float64).ravel()
+
+    n_v = V.shape[0]
+    mag = np.full(n_v, np.nan, dtype=np.float64)
+    if n_v == 0 or F.size == 0:
+        return mag
+
+    grad_face = per_face_gradient(V, F, s)              # (n_f, 3)
+
+    p0 = V[F[:, 0]]
+    p1 = V[F[:, 1]]
+    p2 = V[F[:, 2]]
+    area = 0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0), axis=1)
+
+    face_ok = np.all(np.isfinite(grad_face), axis=1) & np.isfinite(area) & (area > 0)
+    weight = np.where(face_ok, area / 3.0, 0.0)
+    g_w = np.where(face_ok[:, None], grad_face, 0.0)
+
+    sum_g = np.zeros((n_v, 3), dtype=np.float64)
+    sum_w = np.zeros(n_v, dtype=np.float64)
+    for k in range(3):
+        np.add.at(sum_g, F[:, k], g_w * weight[:, None])
+        np.add.at(sum_w, F[:, k], weight)
+
+    safe = sum_w > 0
+    grad_v = np.zeros((n_v, 3), dtype=np.float64)
+    grad_v[safe] = sum_g[safe] / sum_w[safe][:, None]
+    m = np.linalg.norm(grad_v, axis=1)
+    mag[safe] = m[safe]
+    return mag
+
+
 def conduction_velocity_from_lat(
     V: np.ndarray,
     F: np.ndarray,
@@ -90,34 +141,11 @@ def conduction_velocity_from_lat(
     if n_v == 0 or F.size == 0:
         return cv
 
-    # 1) Per-face gradient of LAT.
-    grad_face = per_face_gradient(V, F, lat)            # (n_f, 3) ms/mm
+    # |grad LAT| (ms/mm) at each vertex via the shared helper.
+    mag = vertex_gradient_magnitude(V, F, lat)
+    has_grad = np.isfinite(mag)
 
-    # 2) Face areas (used as the lumped-mass weights, 1/3 per vertex).
-    p0 = V[F[:, 0]]
-    p1 = V[F[:, 1]]
-    p2 = V[F[:, 2]]
-    area = 0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0), axis=1)
-
-    # Drop faces whose gradient or area is non-finite (NaN LAT, sliver, ...).
-    face_ok = np.all(np.isfinite(grad_face), axis=1) & np.isfinite(area) & (area > 0)
-    weight = np.where(face_ok, area / 3.0, 0.0)         # (n_f,)
-    g_w = np.where(face_ok[:, None], grad_face, 0.0)    # (n_f, 3)
-
-    # 3) Scatter-add to vertices.
-    sum_g = np.zeros((n_v, 3), dtype=np.float64)
-    sum_w = np.zeros(n_v, dtype=np.float64)
-    for k in range(3):
-        np.add.at(sum_g, F[:, k], g_w * weight[:, None])
-        np.add.at(sum_w, F[:, k], weight)
-
-    safe = sum_w > 0
-    grad_v = np.zeros((n_v, 3), dtype=np.float64)
-    grad_v[safe] = sum_g[safe] / sum_w[safe][:, None]
-    mag = np.linalg.norm(grad_v, axis=1)                # ms/mm at each vertex
-
-    # 4) CV = 1 / |∇LAT|, capped. Plateaus (mag ~ 0) saturate at max_cv.
-    has_grad = safe & np.isfinite(mag)
+    # CV = 1 / |grad LAT|, capped. Plateaus (mag ~ 0) saturate at max_cv.
     mag_eff = np.where(has_grad & (mag > float(min_grad)), mag, np.nan)
     with np.errstate(divide="ignore", invalid="ignore"):
         cv_raw = 1.0 / mag_eff

@@ -11,6 +11,9 @@ from PIL import ImageGrab
 import pandas as pd
 import librosa
 from tkinter import filedialog
+from tkinter import messagebox
+import threading
+import time
 import traceback
 
 
@@ -18,7 +21,7 @@ import traceback
 from .table_pkg import TableWidget
 from .carto import Carto
 from .ui import Toplevel as tp
-from .ui import open_acquisition_patch_window
+from . import patch_global
 from .controller import AppController
 from .plotting import PlotPresenter
 from .session_store import SessionStore
@@ -191,13 +194,13 @@ class App(tk.Tk):
             font=("timesnewroman", 10),
         )
         self.button_compute_all.pack(side=tk.LEFT, padx=10)
-        self.button_patch_tool = tk.Button(
+        self.button_global_patch = tk.Button(
             self.frame,
-            text="Patch analysis…",
-            command=self._open_acquisition_patch_tool,
+            text="Compute patch dv/ds",
+            command=self._compute_global_patch_clicked,
             font=("timesnewroman", 10),
         )
-        self.button_patch_tool.pack(side=tk.LEFT, padx=10)
+        self.button_global_patch.pack(side=tk.LEFT, padx=10)
         # ML toolbar row: model dropdown + loader + predicted-label display.
         # Lives in its own frame so the main toolbar above doesn't overflow
         # horizontally when many models / long names are listed.
@@ -287,18 +290,31 @@ class App(tk.Tk):
             ).pack(fill="both", expand=True, padx=8, pady=8)
             self.mesh_panel = None
 
+        # Per-patch dv/ds state. Populated by "Compute patch dv/ds":
+        #   patch_global_results = {section_i: {window_type: {dvds_patch, ...}}}
+        # A "patch" is one acquisition take/section. When results exist,
+        # set_figure adds a 4th "dvds" subplot under the bipolar axis; a
+        # window-type selector + time slider drive the cached |dV/ds| field
+        # on the 3D mesh, and the take owning the currently-navigated point
+        # is the active patch (mesh + subplot follow navigation).
+        self.patch_global_results: dict = {}
+        self.patch_active_window: str | None = None
+        self.patch_time_index: int = 0
+        self._patch_slider = None
+        self._patch_window_combo = None
+        self._patch_window_var = None
+        self._patch_preview_on = False
+        self._patch_cursor_line = None
+        # Lazy per-patch compute: shared mesh operators are built once and
+        # reused; each take/section is computed on first visit and cached in
+        # ``patch_global_results`` so re-visits are instant.
+        self._patch_ops = None
+        self._patch_mode_on = False
+        self._patch_sections_computing: set[int] = set()
+
         # self.axes is a dictionary that contains the axes objects for the top, mid, and bottom axes.
         self.set_figure()
-        self.ccs={}
-        # r = row index, i = axis key ("top"/"mid"/"bot").
-        for r,i in enumerate(self.axes.keys()):
-            self.cc=tk.Canvas(self.frame1,width=110,height=130,bg="white",highlightbackground="white")
-            self.cc.grid(column=1,row=r,sticky="")
-            self.ccs[i]=self.cc
-
-        self.frame1.grid_rowconfigure((0,1,2), weight=1)
-        self.frame1.grid_columnconfigure(0, weight=6)
-        self.frame1.grid_columnconfigure(1, weight=1)
+        self._build_legend_canvases()
         self.main()
         self.plot()
         
@@ -331,29 +347,71 @@ class App(tk.Tk):
             self.button_VT.config(text="Switch to VT Protocol")
         self.update_plot()
         
-    def set_figure(self,x=3,y=1,mod=False):
-        
-        self.fig, self.axes = plt.subplots(x,y)
+    def set_figure(self, with_dvds=False, mod=False):
+        """(Re)build the matplotlib figure embedded in ``frame1``.
+
+        Normally three stacked subplots (``top`` unipolar, ``mid`` bipolar,
+        ``bot`` reference). When ``with_dvds`` is True a 4th subplot ``dvds``
+        is inserted directly under the bipolar axis (order top, mid, dvds,
+        bot) for the global-patch dV/ds curve. ``mod`` first clears every
+        existing widget from ``frame1`` (used when rebuilding the layout).
+        """
+        if mod:
+            for widget in self.frame1.winfo_children():
+                widget.destroy()
+            self._patch_slider = None
+            self._patch_window_combo = None
+            self._patch_cursor_line = None
+            prev = getattr(self, "fig", None)
+            if prev is not None:
+                try:
+                    plt.close(prev)
+                except Exception:
+                    traceback.print_exc()
+
+        self.with_dvds = bool(with_dvds)
+        keys = ["top", "mid", "dvds", "bot"] if with_dvds else ["top", "mid", "bot"]
+        nrows = len(keys)
+
+        self.fig = plt.figure()
         plt.subplots_adjust(left=0.05, right=0.98, top=0.9, bottom=0.05)
-        self.axes={m:self.axes[i] for i,m in enumerate(["top","mid","bot"])}
-        print(np.shape(self.axes))
         self.fig.clf()
-        self.axes["top"]=self.fig.add_subplot(3,1,1)
-        self.axes["mid"]=self.fig.add_subplot(3,1,2)
-        self.axes["bot"]=self.fig.add_subplot(3,1,3)
+        self.axes = {}
+        for r, k in enumerate(keys):
+            self.axes[k] = self.fig.add_subplot(nrows, 1, r + 1)
         self.axes["top"].set_xlim([0,2.5]); self.axes["top"].set_ylim([-1,1])
         self.axes["mid"].set_xlim([0,2.5]); self.axes["mid"].set_ylim([-1,1])
         self.axes["bot"].set_xlim([0,2.5]); self.axes["bot"].set_ylim([-10,10])
-        if mod:
-            #clear frame
-            for widget in self.frame1.winfo_children():
-                widget.destroy()
+        if with_dvds:
+            self.axes["dvds"].set_xlim([0,2.5]); self.axes["dvds"].set_ylim([0,1])
+        self._fig_nrows = nrows
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame1)
-        self.canvas.get_tk_widget().grid(column=0,row=0,rowspan=3,sticky=tk.NSEW)
+        self.canvas.get_tk_widget().grid(column=0,row=0,rowspan=nrows,sticky=tk.NSEW)
+
+    def _build_legend_canvases(self):
+        """(Re)create the per-axis legend canvases and grid weights.
+
+        Driven by the current ``self.axes`` keys so it works for both the
+        3-row and 4-row (dv/ds) layouts.
+        """
+        self.ccs = {}
+        for r, key in enumerate(self.axes.keys()):
+            cc = tk.Canvas(self.frame1, width=110, height=130, bg="white", highlightbackground="white")
+            cc.grid(column=1, row=r, sticky="")
+            self.ccs[key] = cc
+        nrows = len(self.axes)
+        for r in range(nrows):
+            self.frame1.grid_rowconfigure(r, weight=1)
+        # The control row (slider/selector) sits just below the subplots.
+        self.frame1.grid_rowconfigure(nrows, weight=0)
+        self.frame1.grid_columnconfigure(0, weight=6)
+        self.frame1.grid_columnconfigure(1, weight=1)
 
         
 
-    def main(self):
+    def _bind_canvas_events(self):
+        """Connect matplotlib canvas events. Re-run whenever the canvas is
+        rebuilt (e.g. when the dv/ds subplot is added)."""
         def mpl_arrow(event):
             if event.key=="right":
                 self.s_increase(event)
@@ -364,10 +422,13 @@ class App(tk.Tk):
             elif event.key=="down":
                 self.p_increase(event)
 
-
-        self.canvas.mpl_connect("key_press_event",mpl_arrow) 
-        self.canvas.mpl_connect("button_press_event", self.on_right_click) 
+        self.canvas.mpl_connect("key_press_event",mpl_arrow)
+        self.canvas.mpl_connect("button_press_event", self.on_right_click)
         self.canvas.mpl_connect("button_release_event", self.on_right_release)
+        self.canvas.mpl_connect("scroll_event", self.on_scroll)
+
+    def main(self):
+        self._bind_canvas_events()
         tv = self.table.tree
 
         # Event callback hooks:
@@ -382,7 +443,6 @@ class App(tk.Tk):
         # edit committed (Return, dropdown pick, focus-out if you set it to commit)
         tv.on_edit_commit = lambda ctx: self.table_glue.table_commit_ctx(ctx)
 
-        self.canvas.mpl_connect("scroll_event", self.on_scroll)
         super().protocol("WM_DELETE_WINDOW", self.quit)
         # Create the figure and axis objects
     def quit(self):
@@ -438,9 +498,479 @@ class App(tk.Tk):
         except Exception:
             traceback.print_exc()
 
-    def _open_acquisition_patch_tool(self) -> None:
+    # --------------------------------------------------------------- global patch
+    def _mesh_viewer(self):
+        panel = getattr(self, "mesh_panel", None)
+        if panel is None:
+            return None
+        return getattr(panel, "viewer", None)
+
+    def _auto_reject_for_global_patch(self) -> int:
+        """Label points with < 3 stim windows or < 1 SR window as ``Reject``.
+
+        These signals can't contribute to a full S1/S2/S3 + SR global patch,
+        so they are auto-rejected (carto label + delta + table) before the
+        compute gathers anchors. Returns the number newly rejected.
+        """
+        n = 0
+        for gidx, entry in enumerate(self.delta):
+            if not (isinstance(entry, (list, tuple)) and len(entry) >= 3):
+                continue
+            if str(entry[1] or "").strip().lower() == "reject":
+                continue
+            c1 = entry[2]
+            if not isinstance(c1, dict):
+                continue
+            n_stim, n_sr = patch_global.count_valid_windows(c1)
+            if n_stim < 3 or n_sr < 1:
+                try:
+                    self._mark_row_reject(gidx, c1)
+                    n += 1
+                except Exception:
+                    traceback.print_exc()
+        return n
+
+    def _compute_global_patch_clicked(self) -> None:
+        """Build per-take/window |dV/ds| patch maps over all non-rejected points.
+
+        Each acquisition take/section is treated as a patch; for every take
+        and window type the take's electrodes interpolate the unipolar V over
+        the take's own footprint and the spatial gradient is cached. Runs the
+        heavy harmonic pipeline on a background thread, shows a progress
+        window, then (on success) adds the dv/ds subplot + time slider and
+        drives the cached field on the 3D mesh.
+        """
+        if getattr(self, "_global_patch_running", False):
+            return
+        viewer = self._mesh_viewer()
+        if viewer is None:
+            messagebox.showerror("Compute patch dv/ds", "3D mesh viewer is not available.")
+            return
+        if not any(isinstance(e, (list, tuple)) and len(e) >= 3 for e in self.delta):
+            messagebox.showinfo(
+                "Compute patch dv/ds",
+                "No analysed signals found. Run 'Compute all' first so each "
+                "point has its stim/SR windows populated, then try again.",
+            )
+            return
         try:
-            open_acquisition_patch_window(self)
+            if not viewer._mesh_loaded:
+                viewer._load_mesh()
+        except Exception:
+            traceback.print_exc()
+
+        self._global_patch_running = True
+        try:
+            self.button_global_patch.config(state=tk.DISABLED)
+        except Exception:
+            traceback.print_exc()
+
+        win = self._open_patch_progress_window()
+        start_t = time.time()
+
+        def progress_cb(done, total, msg):
+            self.after(0, lambda: self._update_patch_progress(win, done, total, msg, start_t))
+
+        section = self._active_section()
+
+        def worker():
+            try:
+                if self._patch_ops is None:
+                    self.after(0, lambda: self._update_patch_progress(
+                        win, 0, 1, "Building mesh operators…", start_t))
+                    ops = patch_global.build_shared_ops(self)
+                else:
+                    ops = self._patch_ops
+                res = patch_global.compute_section_patches(
+                    self, section, ops=ops, progress_cb=progress_cb)
+                self.after(0, lambda: self._on_first_patch_done(ops, section, res, win))
+            except Exception as exc:
+                traceback.print_exc()
+                self.after(0, lambda e=exc: self._on_global_patch_error(e, win))
+
+        threading.Thread(target=worker, daemon=True, name="patch-dvds").start()
+
+    def _open_patch_progress_window(self):
+        win = tk.Toplevel(self)
+        win.title("Compute patch dv/ds")
+        win.geometry("440x150")
+        win.transient(self)
+        tk.Label(
+            win, text="Computing per-patch |dV/ds| maps…",
+            font=("timesnewroman", 11, "bold"),
+        ).pack(pady=(14, 6))
+        pb = ttk.Progressbar(win, orient="horizontal", length=380, mode="determinate")
+        pb.pack(pady=4)
+        lbl = tk.Label(win, text="Starting…", font=("timesnewroman", 9))
+        lbl.pack(pady=2)
+        elapsed = tk.Label(win, text="Elapsed: 0.0 s", font=("timesnewroman", 9))
+        elapsed.pack(pady=2)
+        win._pb = pb
+        win._lbl = lbl
+        win._elapsed = elapsed
+        # Block the close button while computing.
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+        return win
+
+    def _update_patch_progress(self, win, done, total, msg, start_t):
+        if win is None or not win.winfo_exists():
+            return
+        try:
+            win._pb["value"] = (100.0 * done / total) if total else 0.0
+            win._lbl.config(text=f"{msg}  ({done}/{total})")
+            win._elapsed.config(text=f"Elapsed: {time.time() - start_t:.1f} s")
+        except Exception:
+            traceback.print_exc()
+
+    def _on_global_patch_error(self, exc, win):
+        self._global_patch_running = False
+        try:
+            self.button_global_patch.config(state=tk.NORMAL)
+        except Exception:
+            traceback.print_exc()
+        if win is not None and win.winfo_exists():
+            win.destroy()
+        messagebox.showerror("Compute patch dv/ds", f"Failed: {exc}")
+
+    def _on_first_patch_done(self, ops, section, res, win):
+        """Set up the patch UI after the first take has been computed."""
+        self._global_patch_running = False
+        try:
+            self.button_global_patch.config(state=tk.NORMAL)
+        except Exception:
+            traceback.print_exc()
+        if win is not None and win.winfo_exists():
+            win.destroy()
+        self._patch_ops = ops
+        if not res:
+            messagebox.showinfo(
+                "Compute patch dv/ds",
+                "This take has no qualifying patch.\n\nA take/window patch "
+                f"needs at least {patch_global._MIN_PATCH_ANCHORS} non-rejected "
+                "points with a measurable window. Run 'Compute all' first so "
+                "windows/references are populated, then navigate to a take "
+                "with enough points.",
+            )
+            return
+
+        self.patch_global_results = {int(section): res}
+        # All four windows are offered; takes lacking one just show "no patch".
+        order = list(patch_global.WINDOW_TYPES)
+        # Prefer the first window this take actually has.
+        self.patch_active_window = next(
+            (w for w in order if w in res), order[0]
+        )
+        self.patch_time_index = 0
+        self._patch_mode_on = True
+
+        # Rebuild the figure with the 4th dv/ds subplot, then re-create the
+        # legend canvases, event bindings, and the slider/selector controls.
+        self.set_figure(with_dvds=True, mod=True)
+        self._build_legend_canvases()
+        self._bind_canvas_events()
+        self._build_patch_controls(order)
+        self._begin_patch_mesh_preview()
+        # Redraw signals (top/mid/bot) and refresh the active take's patch
+        # (mesh + dv/ds subplot). As the user navigates to other takes they
+        # are computed lazily and cached.
+        self.update_plot()
+        self._sync_patch_to_current_point()
+
+        wins_here = ", ".join(w for w in order if w in res)
+        messagebox.showinfo(
+            "Compute patch dv/ds",
+            f"Take {section} computed ({wins_here}).\n\nNavigate to other "
+            "points to compute their takes on demand (cached after the first "
+            "visit).",
+        )
+
+    def _sync_patch_to_current_point(self):
+        """Show the take owning the current point, computing it if needed."""
+        if not self._patch_mode_on or "dvds" not in getattr(self, "axes", {}):
+            return
+        sec = self._active_section()
+        if sec in self.patch_global_results:
+            self._refresh_active_patch()
+        else:
+            self._ensure_section_computed_async(sec)
+
+    def _ensure_section_computed_async(self, section):
+        """Compute one take's patches on a worker thread, then cache+refresh."""
+        sec = int(section)
+        if sec in self.patch_global_results or sec in self._patch_sections_computing:
+            self._refresh_active_patch()
+            return
+        if self._patch_ops is None:
+            return
+        self._patch_sections_computing.add(sec)
+        # Busy hint on the dv/ds subplot while the take computes.
+        try:
+            ax = self.axes.get("dvds")
+            if ax is not None:
+                ax.clear()
+                ax.set_title(f"dV/ds  [{self.patch_active_window}]  computing take {sec}…",
+                             fontsize=8)
+                ax.set_xlabel("time (s)", fontsize=7)
+                ax.set_ylabel("|dV/ds|", fontsize=7)
+                ax.set_xlim([0, 2.5])
+                self.canvas.draw_idle()
+        except Exception:
+            traceback.print_exc()
+
+        ops = self._patch_ops
+
+        def worker():
+            try:
+                res = patch_global.compute_section_patches(self, sec, ops=ops)
+                self.after(0, lambda: self._on_section_computed(sec, res))
+            except Exception:
+                traceback.print_exc()
+                self.after(0, lambda: self._on_section_computed(sec, {}))
+
+        threading.Thread(target=worker, daemon=True, name=f"patch-take-{sec}").start()
+
+    def _on_section_computed(self, section, res):
+        sec = int(section)
+        self._patch_sections_computing.discard(sec)
+        self.patch_global_results[sec] = res or {}
+        # Only refresh if the user is still on this take.
+        if self._active_section() == sec:
+            self._refresh_active_patch()
+
+    # ----- per-patch accessors -------------------------------------------
+    def _active_section(self) -> int:
+        """The take/section that owns the currently-navigated point."""
+        try:
+            return int(self.i)
+        except Exception:
+            return -1
+
+    def _active_patch_result(self):
+        """Result dict for the current take + active window, or ``None``."""
+        if not self.patch_global_results:
+            return None
+        bywt = self.patch_global_results.get(self._active_section())
+        if not bywt:
+            return None
+        return bywt.get(self.patch_active_window)
+
+    def _patch_abs_time_seconds(self, res, rel=None):
+        """Absolute signal time (seconds) for a patch result's sample axis.
+
+        Uses the currently-navigated point's own reference when it is an
+        anchor of this patch, else the patch's representative reference, so
+        the dv/ds curve lands where the window actually sits in the 0-2.5 s
+        trace.
+        """
+        if rel is None:
+            rel = res["rel"]
+        fs = float(res.get("fs") or patch_global.DEFAULT_FS) or patch_global.DEFAULT_FS
+        ref = int(res.get("ref_repr", 0))
+        try:
+            gidx = self.to_index[self.i][self.j]
+            c1 = self.delta[gidx][2]
+            span = patch_global._window_ref_and_span(c1, self.patch_active_window)
+            if span is not None:
+                ref = int(span[0])
+        except Exception:
+            pass
+        return (ref + np.asarray(rel, dtype=np.float64)) / fs
+
+    def _patch_full_field(self, res, idx):
+        """Scatter a patch sample into a full per-vertex array (NaN elsewhere)."""
+        n_v = int(np.asarray(self.carto.vertices).shape[0])
+        full = np.full(n_v, np.nan, dtype=np.float64)
+        pv = np.asarray(res["patch_vertices"], dtype=np.int64)
+        series = res["dvds_patch"]
+        k = max(0, min(series.shape[0] - 1, int(idx)))
+        full[pv] = np.asarray(series[k], dtype=np.float64)
+        return full
+
+    def _build_patch_controls(self, order):
+        """Window-type selector + time slider under the subplots (in frame1)."""
+        nrows = len(self.axes)
+        frame = tk.Frame(self.frame1, background="white")
+        frame.grid(column=0, row=nrows, columnspan=2, sticky="ew", pady=2)
+        tk.Label(frame, text="Window:", background="white").pack(side=tk.LEFT, padx=(4, 2))
+        self._patch_window_var = tk.StringVar(value=self.patch_active_window)
+        combo = ttk.Combobox(
+            frame, textvariable=self._patch_window_var, values=list(order),
+            state="readonly", width=6,
+        )
+        combo.pack(side=tk.LEFT, padx=4)
+        combo.bind("<<ComboboxSelected>>", self._on_patch_window_change)
+        self._patch_window_combo = combo
+        tk.Label(frame, text="Time:", background="white").pack(side=tk.LEFT, padx=(10, 2))
+        res = self._active_patch_result()
+        n = int(res["dvds_patch"].shape[0]) if res is not None else 1
+        self._patch_slider = ttk.Scale(
+            frame, from_=0, to=max(0, n - 1), orient="horizontal",
+            command=self._on_patch_slider_change,
+        )
+        self._patch_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=6)
+        self._patch_time_label = tk.Label(frame, text="", background="white", width=12)
+        self._patch_time_label.pack(side=tk.LEFT, padx=6)
+        self._update_patch_time_label()
+
+    def _begin_patch_mesh_preview(self):
+        viewer = self._mesh_viewer()
+        if viewer is None or not self.patch_global_results:
+            return
+        try:
+            if viewer.begin_patch_preview(f"patch:dvds_{self.patch_active_window}"):
+                self._patch_preview_on = True
+        except Exception:
+            traceback.print_exc()
+
+    def _push_patch_field_to_mesh(self):
+        viewer = self._mesh_viewer()
+        res = self._active_patch_result()
+        if viewer is None or not self._patch_preview_on:
+            return
+        try:
+            if res is None:
+                # Current take has no patch for this window: blank the mesh.
+                n_v = int(np.asarray(self.carto.vertices).shape[0])
+                viewer.set_patch_preview_field(np.full(n_v, np.nan, dtype=np.float64))
+                return
+            viewer.set_patch_preview_field(self._patch_full_field(res, self.patch_time_index))
+        except Exception:
+            traceback.print_exc()
+
+    def _refresh_active_patch(self):
+        """Re-sync slider range, mesh field, colour range + subplot for the
+        take that owns the current point. Called after compute, on window
+        change, and whenever navigation lands on a different take."""
+        if not self.patch_global_results or "dvds" not in getattr(self, "axes", {}):
+            return
+        res = self._active_patch_result()
+        if res is not None:
+            n = int(res["dvds_patch"].shape[0])
+            self.patch_time_index = max(0, min(n - 1, int(self.patch_time_index)))
+            if self._patch_slider is not None:
+                try:
+                    self._patch_slider.configure(to=max(0, n - 1))
+                    self._patch_slider.set(self.patch_time_index)
+                except Exception:
+                    traceback.print_exc()
+            viewer = self._mesh_viewer()
+            if viewer is not None and self._patch_preview_on:
+                try:
+                    viewer.set_patch_preview_color_range(res["vmin"], res["vmax"])
+                except Exception:
+                    traceback.print_exc()
+        self._push_patch_field_to_mesh()
+        self._update_patch_time_label()
+        self._redraw_patch_subplot()
+
+    def _on_patch_slider_change(self, value):
+        if not self.patch_global_results or self.patch_active_window is None:
+            return
+        try:
+            idx = int(round(float(value)))
+        except (TypeError, ValueError):
+            return
+        res = self._active_patch_result()
+        if res is None:
+            return
+        n = int(res["dvds_patch"].shape[0])
+        self.patch_time_index = max(0, min(n - 1, idx))
+        self._push_patch_field_to_mesh()
+        self._update_patch_time_label()
+        self._update_patch_cursor()
+
+    def _on_patch_window_change(self, _event=None):
+        if self._patch_window_var is None:
+            return
+        wt = self._patch_window_var.get()
+        if wt not in patch_global.WINDOW_TYPES:
+            return
+        self.patch_active_window = wt
+        self.patch_time_index = 0
+        viewer = self._mesh_viewer()
+        if viewer is not None and self._patch_preview_on:
+            try:
+                viewer.set_patch_preview_label(f"patch:dvds_{wt}")
+            except Exception:
+                traceback.print_exc()
+        self._refresh_active_patch()
+
+    def _update_patch_time_label(self):
+        res = self._active_patch_result()
+        lbl = getattr(self, "_patch_time_label", None)
+        if lbl is None:
+            return
+        if res is None:
+            try:
+                lbl.config(text="—")
+            except Exception:
+                traceback.print_exc()
+            return
+        t_abs = self._patch_abs_time_seconds(res)
+        if 0 <= self.patch_time_index < t_abs.size:
+            try:
+                lbl.config(text=f"{t_abs[self.patch_time_index]:.3f} s")
+            except Exception:
+                traceback.print_exc()
+
+    def _redraw_patch_subplot(self):
+        """Draw the current point's patch dv/ds vs absolute time (0-2.5 s)."""
+        if not self.patch_global_results or "dvds" not in getattr(self, "axes", {}):
+            return
+        ax = self.axes["dvds"]
+        ax.clear()
+        self._patch_cursor_line = None
+        res = self._active_patch_result()
+        title = f"dV/ds  [{self.patch_active_window}]"
+        if res is None:
+            ax.set_title(title + "  (no patch for this take/window)", fontsize=8)
+            ax.set_xlabel("time (s)", fontsize=7)
+            ax.set_ylabel("|dV/ds|", fontsize=7)
+            ax.set_xlim([0, 2.5])
+            self.canvas.draw_idle()
+            return
+        t_abs = self._patch_abs_time_seconds(res)
+        try:
+            gidx = self.to_index[self.i][self.j]
+        except Exception:
+            gidx = -1
+        vidx = res["anchor_vertex"].get(int(gidx))
+        col = None
+        if vidx is not None:
+            pv = np.asarray(res["patch_vertices"], dtype=np.int64)
+            pos = int(np.searchsorted(pv, int(vidx)))
+            if 0 <= pos < pv.size and int(pv[pos]) == int(vidx):
+                col = pos
+        if col is not None and t_abs.size:
+            series = res["dvds_patch"][:, col]
+            ax.plot(t_abs, series, color="tab:purple", linewidth=1.0)
+            title += f"  point #{gidx}"
+        else:
+            title += "  (current point not an anchor for this take/window)"
+        if 0 <= self.patch_time_index < t_abs.size:
+            self._patch_cursor_line = ax.axvline(
+                float(t_abs[self.patch_time_index]), color="red", linewidth=1.0
+            )
+        ax.set_title(title, fontsize=8)
+        ax.set_xlabel("time (s)", fontsize=7)
+        ax.set_ylabel("|dV/ds|", fontsize=7)
+        ax.set_xlim([0, 2.5])
+        self.canvas.draw_idle()
+
+    def _update_patch_cursor(self):
+        res = self._active_patch_result()
+        if res is None or "dvds" not in getattr(self, "axes", {}):
+            return
+        t_abs = self._patch_abs_time_seconds(res)
+        if not (0 <= self.patch_time_index < t_abs.size):
+            return
+        x = float(t_abs[self.patch_time_index])
+        try:
+            if self._patch_cursor_line is not None:
+                self._patch_cursor_line.set_xdata([x, x])
+            else:
+                self._patch_cursor_line = self.axes["dvds"].axvline(x, color="red", linewidth=1.0)
+            self.canvas.draw_idle()
         except Exception:
             traceback.print_exc()
 
@@ -568,6 +1098,14 @@ class App(tk.Tk):
             self.plot()
         except Exception:
             traceback.print_exc()
+        # Re-sync the patch (mesh + slider + dv/ds subplot) to the take that
+        # owns the new point, computing it lazily if not cached. The subplot
+        # was cleared by the loop above.
+        if self._patch_mode_on and "dvds" in self.axes:
+            try:
+                self._sync_patch_to_current_point()
+            except Exception:
+                traceback.print_exc()
 
     def p_increase(self,event=None):
         return self.controller.p_increase(event)
