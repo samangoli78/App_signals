@@ -890,18 +890,76 @@ class CartoMeshPanel(tk.Frame):
         self.viewer._request_redraw()
 
     def _export_vtk_deltas(self) -> None:
-        d = filedialog.askdirectory(title="Export delta metrics as VTK — choose folder")
-        if not d:
-            return
-        try:
-            n = int(self.viewer.export_vtk_deltas(d))
-            messagebox.showinfo(
-                "VTK export",
-                f"Wrote {n} legacy ASCII .vtk file(s) to:\n{d}",
+        dlg = tk.Toplevel(self.winfo_toplevel())
+        dlg.title("Export VTK for Carto")
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        body = ttk.Frame(dlg, padding=12)
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(
+            body,
+            text="Legacy Carto .vtk (version 4.1):\n"
+            "PatientData header, SCALARS scalars double [0–1],\n"
+            "LOOKUP_TABLE lookup_table (1000 rows, 4 color bands), NORMALS Normals float.\n"
+            "Triangle winding is swapped for Carto-compatible face orientation.",
+            justify="left",
+        ).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(body, text="Patient name:").pack(anchor="w")
+        name_var = tk.StringVar()
+        ttk.Entry(body, textvariable=name_var, width=48).pack(fill="x", pady=(4, 10))
+
+        ttk.Label(
+            body,
+            text="Interpolation radius / Global harmonic (toolbar) affect scalar values only.",
+            foreground="#444",
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+
+        btn_row = ttk.Frame(body)
+        btn_row.pack(fill="x")
+
+        def _cancel() -> None:
+            dlg.grab_release()
+            dlg.destroy()
+
+        def _go() -> None:
+            patient_name = str(name_var.get()).strip()
+            if not patient_name:
+                messagebox.showwarning("VTK export", "Patient name is required.", parent=dlg)
+                return
+            dlg.grab_release()
+            dlg.destroy()
+            folder = filedialog.askdirectory(
+                title="Export Carto .vtk files — choose folder",
+                parent=self.winfo_toplevel(),
             )
-        except Exception as exc:
-            traceback.print_exc()
-            messagebox.showerror("VTK export", str(exc))
+            if not folder:
+                return
+            try:
+                n = int(self.viewer.export_vtk_deltas(folder, patient_name=patient_name))
+                if n <= 0:
+                    messagebox.showwarning(
+                        "VTK export",
+                        "No files written. Load a mesh and compute delta metrics first.",
+                        parent=self.winfo_toplevel(),
+                    )
+                    return
+                messagebox.showinfo(
+                    "VTK export",
+                    f"Wrote {n} Carto .vtk file(s).\n\nPatient: {patient_name}\nFolder: {folder}",
+                    parent=self.winfo_toplevel(),
+                )
+            except Exception as exc:
+                traceback.print_exc()
+                messagebox.showerror("VTK export", str(exc), parent=self.winfo_toplevel())
+
+        ttk.Button(btn_row, text="Cancel", command=_cancel).pack(side="right")
+        ttk.Button(btn_row, text="Choose folder && export…", command=_go).pack(side="right", padx=(0, 8))
+        dlg.bind("<Escape>", lambda _e: _cancel())
 
     def _on_viewer_fields(self, _viewer) -> None:
         # Fired when the viewer learns about new delta metrics. Sync the combo.

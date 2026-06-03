@@ -1215,18 +1215,15 @@ class CartoMeshViewer(OpenGLFrame):
             except Exception:
                 traceback.print_exc()
 
-    def export_vtk_deltas(self, folder: str) -> int:
-        """Write one legacy ASCII ``.vtk`` per delta metric (viewer interpolation).
-
-        Uses a VTK 4.1-style legacy polydata writer (no ``vtk`` Python package
-        required). Requires :meth:`set_delta_provider` and a loaded mesh.
-        """
+    def export_vtk_deltas(self, folder: str, *, patient_name: str | None = None) -> int:
+        """Write one legacy ASCII ``.vtk`` per delta metric (Carto legacy layout)."""
         from . import vtk_delta_export as vde
 
         if self._delta_provider is None:
             raise RuntimeError("Delta provider is not registered on the viewer.")
         if not self._mesh_loaded:
             raise RuntimeError("Load a mesh before exporting VTK.")
+        lut = vde.carto_lookup_table_rgba()
         return int(
             vde.export_all_delta_metrics(
                 folder,
@@ -1237,6 +1234,10 @@ class CartoMeshViewer(OpenGLFrame):
                 interpolation_radius=self.interpolation_radius,
                 default_radius_fn=self.default_interpolation_radius,
                 global_pass=bool(self.use_global_patch_harmonic),
+                patient_name=patient_name,
+                lookup_table_rgba=lut,
+                include_normals=True,
+                swap_winding=True,
             )
         )
 
