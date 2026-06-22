@@ -9,6 +9,14 @@ import numpy as np
 
 from . import colormap as cmaplib
 from .viewer import CartoMeshViewer
+from ..ui.ribbon_widgets import (
+    build_ribbon_shell,
+    collapsible_section,
+    ribbon_button,
+    ribbon_checkbox,
+    ribbon_label,
+)
+from ..ui.resize_pause import attach_viewer_resize_pause
 
 class ColorbarSettingsDialog(tk.Toplevel):
     def __init__(self, viewer: CartoMeshViewer) -> None:
@@ -23,6 +31,7 @@ class ColorbarSettingsDialog(tk.Toplevel):
         self._knots = list(viewer.piece_knots)
         self._drag_knot_i: int | None = None
         self._custom_rows: list[dict] = []
+        self._cust_drag_edge: int | None = None
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
@@ -134,13 +143,24 @@ class ColorbarSettingsDialog(tk.Toplevel):
         self._cmap_var.trace_add("write", lambda *a: self._std_preview())
         self._reverse_var.trace_add("write", lambda *a: self._std_preview())
         self._bins_var.trace_add("write", lambda *a: self._std_preview())
-        self._vmin_var.trace_add("write", lambda *_: self._draw_custom_preview_safe())
-        self._vmax_var.trace_add("write", lambda *_: self._draw_custom_preview_safe())
+        self._vmin_var.trace_add("write", lambda *_: self._on_custom_range_var())
+        self._vmax_var.trace_add("write", lambda *_: self._on_custom_range_var())
         self._on_auto()
 
     def _draw_custom_preview_safe(self) -> None:
         if hasattr(self, "_cust_prev"):
             self._draw_custom_preview()
+
+    def _on_custom_range_var(self) -> None:
+        if hasattr(self, "_custom_rows") and self._custom_rows:
+            rng = self._cust_range()
+            if rng is not None:
+                lo, hi = rng
+                self._custom_rows[0]["lo"].set(f"{lo:.6g}")
+                self._custom_rows[-1]["hi"].set(f"{hi:.6g}")
+        self._draw_custom_preview_safe()
+        if hasattr(self, "_kcanvas"):
+            self._std_preview()
 
     def _on_auto(self) -> None:
         st = "disabled" if self._auto_var.get() else "normal"
@@ -269,13 +289,53 @@ class ColorbarSettingsDialog(tk.Toplevel):
         row = 0
         ttk.Label(body, text="Bins (max 5)").grid(row=row, column=0, sticky="w")
         self._cust_n = tk.IntVar(value=3)
-        ttk.Spinbox(body, from_=1, to=cmaplib.MAX_CUSTOM_BINS, textvariable=self._cust_n, width=4, command=self._rebuild_custom_rows).grid(
-            row=row, column=1, sticky="w", padx=4
+        ttk.Spinbox(
+            body,
+            from_=1,
+            to=cmaplib.MAX_CUSTOM_BINS,
+            textvariable=self._cust_n,
+            width=4,
+            command=self._rebuild_custom_rows,
+        ).grid(row=row, column=1, sticky="w", padx=4)
+        ttk.Button(body, text="Equal split on range", command=self._equal_split_custom).grid(
+            row=row, column=2, sticky="w"
         )
-        ttk.Button(body, text="Equal split on range", command=self._equal_split_custom).grid(row=row, column=2, sticky="w")
         row += 1
-        self._cust_prev = tk.Canvas(body, width=420, height=44, bg="#121218", highlightthickness=1, highlightbackground="#666")
+
+        rng = ttk.Frame(body)
+        rng.grid(row=row, column=0, columnspan=4, sticky="w", pady=(0, 4))
+        ttk.Label(rng, text="Range min").grid(row=0, column=0, padx=(0, 4))
+        ttk.Entry(rng, textvariable=self._vmin_var, width=12).grid(row=0, column=1, padx=(0, 12))
+        ttk.Label(rng, text="max").grid(row=0, column=2, padx=(0, 4))
+        ttk.Entry(rng, textvariable=self._vmax_var, width=12).grid(row=0, column=3, padx=(0, 8))
+        ttk.Label(
+            rng,
+            text="(defaults from current colorbar; drag bar edges below or edit here)",
+            foreground="#666666",
+        ).grid(row=0, column=4, sticky="w")
+        row += 1
+
+        self._cust_prev = tk.Canvas(
+            body,
+            width=420,
+            height=56,
+            bg="#121218",
+            highlightthickness=1,
+            highlightbackground="#666",
+            cursor="hand2",
+        )
         self._cust_prev.grid(row=row, column=0, columnspan=4, sticky="w", pady=6)
+        self._cust_prev.bind("<ButtonPress-1>", self._cust_down)
+        self._cust_prev.bind("<B1-Motion>", self._cust_move)
+        self._cust_prev.bind("<ButtonRelease-1>", self._cust_up)
+        self._cust_prev.bind("<ButtonPress-3>", self._cust_right)
+        row += 1
+        ttk.Label(
+            body,
+            text="Drag yellow borders to set bin edges. Right-click a bin to choose its color.",
+            foreground="#666666",
+            wraplength=520,
+        ).grid(row=row, column=0, columnspan=4, sticky="w")
         row += 1
         self._cust_grid = ttk.Frame(body)
         self._cust_grid.grid(row=row, column=0, columnspan=4, sticky="nw")
@@ -301,7 +361,11 @@ class ColorbarSettingsDialog(tk.Toplevel):
             self._cust_n.set(n)
 
         st = self.viewer.get_color_state()
-        lo, hi = float(st["vmin"]), float(st["vmax"])
+        try:
+            lo = float(self._vmin_var.get())
+            hi = float(self._vmax_var.get())
+        except (ValueError, tk.TclError):
+            lo, hi = float(st["vmin"]), float(st["vmax"])
         if hi <= lo:
             hi = lo + 1.0
         palette = [(0.2, 0.45, 0.95), (0.15, 0.85, 0.35), (0.95, 0.75, 0.15), (0.95, 0.35, 0.2), (0.75, 0.35, 0.9)]
@@ -320,10 +384,156 @@ class ColorbarSettingsDialog(tk.Toplevel):
             ttk.Label(fr, text=f"Bin {i+1}").grid(row=0, column=0, padx=2)
             ttk.Entry(fr, textvariable=rowd["lo"], width=10).grid(row=0, column=1, padx=2)
             ttk.Entry(fr, textvariable=rowd["hi"], width=10).grid(row=0, column=2, padx=2)
-            ttk.Button(fr, text="Colorâ€¦", command=lambda j=i: self._pick_color(j)).grid(row=0, column=3, padx=4)
+            ttk.Button(fr, text="Color…", command=lambda j=i: self._pick_color(j)).grid(row=0, column=3, padx=4)
             rowd["lo"].trace_add("write", lambda *_a: self._draw_custom_preview_safe())
             rowd["hi"].trace_add("write", lambda *_a: self._draw_custom_preview_safe())
         self._draw_custom_preview()
+
+    def _cust_range(self) -> tuple[float, float] | None:
+        try:
+            lo = float(self._vmin_var.get())
+            hi = float(self._vmax_var.get())
+        except ValueError:
+            return None
+        if hi <= lo:
+            return None
+        return lo, hi
+
+    def _cust_canvas_pad(self) -> int:
+        return 10
+
+    def _cust_val_to_x(self, val: float, lo: float, hi: float, w: int, pad: int) -> float:
+        return pad + (val - lo) / (hi - lo) * (w - 2 * pad)
+
+    def _cust_x_to_val(self, x: float, lo: float, hi: float, w: int, pad: int) -> float:
+        t = (x - pad) / max(w - 2 * pad, 1)
+        return float(lo + np.clip(t, 0.0, 1.0) * (hi - lo))
+
+    def _cust_edge_values(self) -> list[float] | None:
+        rng = self._cust_range()
+        if rng is None or not self._custom_rows:
+            return None
+        lo, hi = rng
+        edges = [lo]
+        for row in self._custom_rows:
+            try:
+                edges.append(float(row["hi"].get()))
+            except ValueError:
+                return None
+        edges[0] = lo
+        edges[-1] = hi
+        return edges
+
+    def _cust_pick_edge(self, x: float) -> int | None:
+        rng = self._cust_range()
+        if rng is None:
+            return None
+        lo, hi = rng
+        c = self._cust_prev
+        w = int(c["width"])
+        pad = self._cust_canvas_pad()
+        edges = self._cust_edge_values()
+        if edges is None:
+            return None
+        best_i, best_d = None, 1e9
+        for i, ev in enumerate(edges):
+            xi = self._cust_val_to_x(ev, lo, hi, w, pad)
+            d = abs(x - xi)
+            if d < best_d and d < 8:
+                best_d, best_i = d, i
+        return best_i
+
+    def _cust_pick_bin(self, x: float) -> int | None:
+        rng = self._cust_range()
+        if rng is None or not self._custom_rows:
+            return None
+        lo, hi = rng
+        c = self._cust_prev
+        w = int(c["width"])
+        pad = self._cust_canvas_pad()
+        try:
+            val = self._cust_x_to_val(x, lo, hi, w, pad)
+        except Exception:
+            return None
+        for i, row in enumerate(self._custom_rows):
+            try:
+                a, b = float(row["lo"].get()), float(row["hi"].get())
+            except ValueError:
+                continue
+            if a <= val <= b or (i == len(self._custom_rows) - 1 and abs(val - b) < 1e-9):
+                return i
+        return None
+
+    def _cust_set_edge(self, edge_i: int, val: float) -> None:
+        n = len(self._custom_rows)
+        if n == 0:
+            return
+        rng = self._cust_range()
+        if rng is None:
+            return
+        lo, hi = rng
+        val = float(np.clip(val, lo, hi))
+        eps = max((hi - lo) * 1e-4, 1e-9)
+
+        if edge_i == 0:
+            if n > 1:
+                try:
+                    next_lo = float(self._custom_rows[1]["lo"].get())
+                except ValueError:
+                    next_lo = hi
+                val = min(val, next_lo - eps)
+            val = max(val, lo)
+            self._auto_var.set(False)
+            self._vmin_var.set(f"{val:.6g}")
+            self._custom_rows[0]["lo"].set(f"{val:.6g}")
+            return
+
+        if edge_i == n:
+            if n > 1:
+                try:
+                    prev_hi = float(self._custom_rows[-2]["hi"].get())
+                except ValueError:
+                    prev_hi = lo
+                val = max(val, prev_hi + eps)
+            val = min(val, hi)
+            self._auto_var.set(False)
+            self._vmax_var.set(f"{val:.6g}")
+            self._custom_rows[-1]["hi"].set(f"{val:.6g}")
+            return
+
+        if 1 <= edge_i < n:
+            try:
+                left_lo = float(self._custom_rows[edge_i - 1]["lo"].get())
+                right_hi = float(self._custom_rows[edge_i]["hi"].get())
+            except ValueError:
+                return
+            val = float(np.clip(val, left_lo + eps, right_hi - eps))
+            self._custom_rows[edge_i - 1]["hi"].set(f"{val:.6g}")
+            self._custom_rows[edge_i]["lo"].set(f"{val:.6g}")
+
+    def _cust_down(self, ev) -> None:
+        self._cust_drag_edge = self._cust_pick_edge(ev.x)
+
+    def _cust_move(self, ev) -> None:
+        if self._cust_drag_edge is None:
+            return
+        rng = self._cust_range()
+        if rng is None:
+            return
+        lo, hi = rng
+        w = int(self._cust_prev["width"])
+        pad = self._cust_canvas_pad()
+        val = self._cust_x_to_val(ev.x, lo, hi, w, pad)
+        self._cust_set_edge(self._cust_drag_edge, val)
+        self._draw_custom_preview()
+
+    def _cust_up(self, _ev) -> None:
+        self._cust_drag_edge = None
+
+    def _cust_right(self, ev) -> None:
+        bi = self._cust_pick_bin(ev.x)
+        if bi is not None:
+            self._pick_color(bi)
 
     def _pick_color(self, j: int) -> None:
         r, g, b = self._custom_rows[j]["rgb"]
@@ -353,27 +563,40 @@ class ColorbarSettingsDialog(tk.Toplevel):
     def _draw_custom_preview(self) -> None:
         c = self._cust_prev
         c.delete("all")
-        try:
-            lo = float(self._vmin_var.get())
-            hi = float(self._vmax_var.get())
-        except ValueError:
+        rng = self._cust_range()
+        if rng is None:
             return
-        if hi <= lo:
-            return
+        lo, hi = rng
         w = int(c["width"])
-        pad = 8
-        for row in self._custom_rows:
+        h = int(c["height"])
+        pad = self._cust_canvas_pad()
+        y0, y1 = 8, h - 14
+        edges = self._cust_edge_values()
+        if edges is None:
+            return
+
+        for i, row in enumerate(self._custom_rows):
             try:
                 a, b = float(row["lo"].get()), float(row["hi"].get())
             except ValueError:
                 continue
-            xa = pad + (a - lo) / (hi - lo) * (w - 2 * pad)
-            xb = pad + (b - lo) / (hi - lo) * (w - 2 * pad)
+            xa = self._cust_val_to_x(a, lo, hi, w, pad)
+            xb = self._cust_val_to_x(b, lo, hi, w, pad)
             if xb < xa:
                 xa, xb = xb, xa
             r, g, b_ = row["rgb"]
             hx = cmaplib.rgb_to_hex((r, g, b_))
-            c.create_rectangle(xa, 6, xb, 36, fill=hx, outline="#ccc")
+            c.create_rectangle(xa, y0, xb, y1, fill=hx, outline="#ccc", tags=("bin", f"bin{i}"))
+
+        c.create_rectangle(pad, y0, w - pad, y1, outline="#888")
+        for i, ev in enumerate(edges):
+            x = self._cust_val_to_x(ev, lo, hi, w, pad)
+            c.create_line(x, y0 - 2, x, y1 + 2, fill="#ffcc00", width=2, tags=("edge", f"edge{i}"))
+            if 0 < i < len(edges) - 1:
+                c.create_text(x, y0 - 4, text=f"{ev:.4g}", anchor="s", fill="#ccc", font=("Segoe UI", 8))
+
+        c.create_text(pad, h - 2, text=f"min {lo:.4g}", anchor="sw", fill="#aaa", font=("Segoe UI", 8))
+        c.create_text(w - pad, h - 2, text=f"max {hi:.4g}", anchor="se", fill="#aaa", font=("Segoe UI", 8))
 
     def _read_std(self) -> dict | None:
         try:
@@ -384,7 +607,7 @@ class ColorbarSettingsDialog(tk.Toplevel):
             messagebox.showerror("Colorbar", str(exc))
             return None
         if n_bins < 2 or n_bins > 256:
-            messagebox.showerror("Colorbar", "Bins must be 2â€“256.")
+            messagebox.showerror("Colorbar", "Bins must be 2–256.")
             return None
         if not self._auto_var.get() and vmax <= vmin:
             messagebox.showerror("Colorbar", "Max must be greater than min.")
@@ -646,8 +869,8 @@ class InterpolateSettingsDialog(tk.Toplevel):
         ttk.Label(
             body,
             text=(
-                "Tip: the toolbar Global checkbox keeps patch-wide harmonic mode on "
-                "for every recompute; it uses this same radius."
+                "Interpolation minimises Dirichlet energy on the geodesic patch "
+                "inside this radius (known values only at electrodes)."
             ),
             foreground="#666666",
         ).grid(row=2, column=0, columnspan=3, sticky="w")
@@ -716,118 +939,70 @@ class CartoMeshPanel(tk.Frame):
         super().__init__(master, **kw)
         self.configure(background="black")
 
-        self._toolbar = tk.Frame(self, background="#1a1a1f")
-        self._toolbar.pack(side="top", fill="x")
+        shell = build_ribbon_shell(self, title="3D mesh", default_width=200)
+        self.ribbon_pane = shell["outer_pane"]
+        col = shell["ribbon_column"]
 
-        tk.Label(self._toolbar, text="Carto 3D mesh", bg="#1a1a1f", fg="white", font=("timesnewroman", 10, "bold")).pack(
-            side="left", padx=6
-        )
-
+        display = collapsible_section(col, "Display")
+        ribbon_label(display["body"], "Scalar field")
         self._field_var = tk.StringVar(value=scalar_field)
         self._field_combo = ttk.Combobox(
-            self._toolbar, textvariable=self._field_var, values=list(cmaplib.SCALAR_FIELDS), width=13, state="readonly"
+            display["body"],
+            textvariable=self._field_var,
+            values=list(cmaplib.SCALAR_FIELDS),
+            state="readonly",
         )
-        self._field_combo.pack(side="left", padx=4, pady=2)
+        self._field_combo.pack(fill="x", padx=6, pady=2)
         self._field_combo.bind("<<ComboboxSelected>>", self._on_field_change)
 
-        tk.Label(self._toolbar, text="cmap", bg="#1a1a1f", fg="#cccccc", font=("timesnewroman", 9)).pack(side="left", padx=(8, 2))
+        ribbon_label(display["body"], "Colormap")
         self._cmap_var = tk.StringVar(value=cmap_name)
         self._cmap_combo = ttk.Combobox(
-            self._toolbar, textvariable=self._cmap_var, values=list(cmaplib.COLORMAPS), width=14, state="readonly"
+            display["body"],
+            textvariable=self._cmap_var,
+            values=list(cmaplib.COLORMAPS),
+            state="readonly",
         )
-        self._cmap_combo.pack(side="left", padx=2, pady=2)
+        self._cmap_combo.pack(fill="x", padx=6, pady=2)
         self._cmap_combo.bind("<<ComboboxSelected>>", self._on_cmap_change)
 
-        tk.Button(self._toolbar, text="Reset view", command=self._on_reset, font=("timesnewroman", 9)).pack(side="left", padx=4, pady=2)
-        tk.Button(self._toolbar, text="Colorbar...", command=self._open_colorbar_settings, font=("timesnewroman", 9)).pack(
-            side="left", padx=2, pady=2
-        )
-        tk.Button(self._toolbar, text="Spheres...", command=self._open_sphere_settings, font=("timesnewroman", 9)).pack(
-            side="left", padx=2, pady=2
-        )
-
+        view = collapsible_section(col, "View")
+        ribbon_button(view["body"], "Reset view", self._on_reset)
+        ribbon_button(view["body"], "Colorbar…", self._open_colorbar_settings)
+        ribbon_button(view["body"], "Spheres…", self._open_sphere_settings)
         self._show_cb_var = tk.IntVar(value=1)
-        tk.Checkbutton(
-            self._toolbar,
-            text="show bar",
-            variable=self._show_cb_var,
-            command=self._toggle_colorbar,
-            bg="#1a1a1f",
-            fg="white",
-            selectcolor="#1a1a1f",
-            activebackground="#1a1a1f",
-            activeforeground="white",
-            font=("timesnewroman", 9),
-        ).pack(side="left", padx=2)
+        ribbon_checkbox(view["body"], "Show colorbar", self._show_cb_var, self._toggle_colorbar)
 
-        # Interpolation tick: when on, expands the field dropdown with the
-        # available delta:<metric> virtual fields, harmonically interpolated
-        # across the mesh via the cotan Laplacian.
+        interp = collapsible_section(col, "Interpolation")
         self._interp_var = tk.IntVar(value=0)
-        tk.Checkbutton(
-            self._toolbar,
-            text="Interpolate",
-            variable=self._interp_var,
-            command=self._toggle_interpolate,
-            bg="#1a1a1f",
-            fg="white",
-            selectcolor="#1a1a1f",
-            activebackground="#1a1a1f",
-            activeforeground="white",
-            font=("timesnewroman", 9),
-        ).pack(side="left", padx=2)
-
-        # Settings button — opens a dialog that controls the geodesic radius
-        # in real time. The radius spinbox / slider now lives in there; the
-        # ``Global`` toggle stays on the toolbar so the user can flip modes
-        # without re-opening a dialog.
-        tk.Button(
-            self._toolbar,
-            text="Interpolate...",
-            command=self._open_interp_settings,
-            font=("timesnewroman", 9),
-        ).pack(side="left", padx=2, pady=2)
-
+        ribbon_checkbox(interp["body"], "Interpolate", self._interp_var, self._toggle_interpolate)
+        ribbon_button(interp["body"], "Interpolate…", self._open_interp_settings)
         self._global_var = tk.IntVar(value=0)
-        tk.Checkbutton(
-            self._toolbar,
-            text="Global",
-            variable=self._global_var,
-            command=self._toggle_global,
-            bg="#1a1a1f",
-            fg="white",
-            selectcolor="#1a1a1f",
-            activebackground="#1a1a1f",
-            activeforeground="white",
-            font=("timesnewroman", 9),
-        ).pack(side="left", padx=2)
-
+        ribbon_checkbox(interp["body"], "Global harmonic", self._global_var, self._toggle_global)
         self._classic_mesh_var = tk.IntVar(value=1)
-        tk.Checkbutton(
-            self._toolbar,
-            text="Classic mesh fill",
-            variable=self._classic_mesh_var,
-            command=self._toggle_classic_mesh_fill,
-            bg="#1a1a1f",
-            fg="white",
-            selectcolor="#1a1a1f",
-            activebackground="#1a1a1f",
-            activeforeground="white",
-            font=("timesnewroman", 9),
-        ).pack(side="left", padx=2)
+        ribbon_checkbox(
+            interp["body"],
+            "Classic mesh fill",
+            self._classic_mesh_var,
+            self._toggle_classic_mesh_fill,
+        )
 
-        tk.Button(
-            self._toolbar,
-            text="Export VTK…",
-            command=self._export_vtk_deltas,
-            font=("timesnewroman", 9),
-        ).pack(side="left", padx=4, pady=2)
+        export = collapsible_section(col, "Export", expanded=False)
+        ribbon_button(export["body"], "Export VTK…", self._export_vtk_deltas)
 
-        self.viewer = CartoMeshViewer(self, carto, scalar_field=scalar_field, cmap_name=cmap_name)
-        self.viewer.pack(side="top", fill="both", expand=True)
+        self.viewer = CartoMeshViewer(
+            shell["content_host"], carto, scalar_field=scalar_field, cmap_name=cmap_name
+        )
+        self.viewer.pack(fill="both", expand=True)
         self.viewer.add_color_listener(self._on_viewer_colors)
         self.viewer.add_fields_listener(self._on_viewer_fields)
         self._interp_dialog: "InterpolateSettingsDialog | None" = None
+
+        attach_viewer_resize_pause(
+            self.viewer,
+            panes=[shell["outer_pane"]],
+            watch_widgets=[shell["ribbon_shell"], shell["content_host"], self.viewer],
+        )
 
     def _on_viewer_colors(self, _viewer) -> None:
         self._show_cb_var.set(1 if self.viewer.show_colorbar else 0)

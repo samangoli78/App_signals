@@ -187,7 +187,7 @@ class Carto(BaseCartoLoader, Parser_carto):
                     signals_df=df,
                 )
             )
-            print(time.time() - t)
+            print(f"Time taken for {fname}: {round(time.time() - t, 2)} seconds")
         self.cont = content
         return content
 

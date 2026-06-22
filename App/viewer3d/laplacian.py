@@ -223,6 +223,50 @@ def harmonic_interpolate(
     return f
 
 
+def _harmonic_min_dirichlet_on_patch(
+    L: sp.spmatrix,
+    anchor_idx: np.ndarray,
+    anchor_val: np.ndarray,
+    in_patch: np.ndarray,
+) -> np.ndarray:
+    """Harmonic extension on ``in_patch`` that minimises discrete Dirichlet energy.
+
+    Known values are enforced only at ``anchor_idx`` (electrode measurements).
+    Every other vertex inside the accepted patch is a free unknown; the patch
+    rim uses the natural Neumann BC from restricting the cotan Laplacian to
+    in-patch neighbours (see :func:`_solve_neumann_patch`).
+    """
+    n = int(L.shape[0])
+    anchor_idx = np.asarray(anchor_idx, dtype=np.int64).ravel()
+    anchor_val = np.asarray(anchor_val, dtype=np.float64).ravel()
+    in_patch = np.asarray(in_patch, dtype=bool).reshape(-1)
+    if in_patch.size != n:
+        raise ValueError("in_patch must have length n")
+
+    f = np.full(n, np.nan, dtype=np.float64)
+    if anchor_idx.size == 0:
+        return f
+
+    if anchor_idx.size > 1:
+        unique, inverse = np.unique(anchor_idx, return_inverse=True)
+        if unique.size != anchor_idx.size:
+            sums = np.zeros(unique.size, dtype=np.float64)
+            counts = np.zeros(unique.size, dtype=np.int64)
+            np.add.at(sums, inverse, anchor_val)
+            np.add.at(counts, inverse, 1)
+            anchor_idx = unique
+            anchor_val = sums / np.maximum(counts, 1)
+
+    is_anchor = np.zeros(n, dtype=bool)
+    is_anchor[anchor_idx] = True
+    f[anchor_idx] = anchor_val
+
+    free = np.where(in_patch & ~is_anchor)[0]
+    if free.size:
+        f[free] = _solve_neumann_patch(L, free, anchor_idx, anchor_val)
+    return f
+
+
 def build_mesh_graph(V: np.ndarray, F: np.ndarray) -> sp.csr_matrix:
     """Symmetric weighted graph of mesh edges (weight = Euclidean edge length).
 
@@ -672,7 +716,7 @@ def harmonic_interpolate_bounded_cached(
     radius: float,
     mode: str = "local",
 ) -> np.ndarray:
-    """Bounded harmonic that uses a precomputed Dijkstra distance matrix.
+    """Bounded harmonic on the geodesic cut patch.
 
     Parameters
     ----------
@@ -686,17 +730,10 @@ def harmonic_interpolate_bounded_cached(
         the matching slice.
     radius : geodesic ball radius (must be > 0 and finite).
     mode :
-        - ``"local"`` (default): vertices reached by exactly one ball get that
-          anchor's value verbatim (Voronoi-style islands); multi-ball overlap
-          regions solve a harmonic system with anchors + single-ball verts as
-          Dirichlet BC. Vertices outside every ball stay NaN.
-        - ``"global"``: the union of geodesic balls is treated as a single
-          patch. Only anchors are Dirichlet; *every* other patch vertex is
-          a free unknown of one harmonic system, and the patch's outer
-          boundary uses the **natural Neumann** BC (∂f/∂n = 0) that falls
-          out of restricting the cotan-Laplacian to the patch rows. A
-          single anchor in a patch therefore drives the whole patch to
-          that anchor's value (constant — the user-requested behaviour).
+        Accepted for API compatibility. Both ``"local"`` and ``"global"`` now
+        solve the same problem: on the union of geodesic balls (the accepted
+        patch), find the harmonic field with fixed anchor values that
+        minimises discrete Dirichlet energy (Neumann rim on the patch cut).
     """
     n = L.shape[0]
     anchor_idx = np.asarray(anchor_idx, dtype=np.int64).ravel()
@@ -716,49 +753,8 @@ def harmonic_interpolate_bounded_cached(
     r = float(radius)
     reach = d <= r
     n_reach = reach.sum(axis=0)
-
-    f = np.full(n, np.nan, dtype=np.float64)
-    f[anchor_idx] = anchor_val
-
-    is_anchor = np.zeros(n, dtype=bool)
-    is_anchor[anchor_idx] = True
-
-    if mode == "global":
-        # Union of geodesic balls = the cut patch. All non-anchor patch
-        # vertices are free; the rim of the patch uses Neumann BC (∂f/∂n=0)
-        # so a single anchor inside fills its whole patch uniformly.
-        in_patch = n_reach >= 1
-        free_mask = in_patch & ~is_anchor
-        if free_mask.any():
-            free = np.where(free_mask)[0]
-            f_F = _solve_neumann_patch(L, free, anchor_idx, anchor_val)
-            f[free] = f_F
-        return f
-
-    # "local" mode (default): single-ball verbatim + multi-ball harmonic blend.
-    single = (n_reach == 1) & ~is_anchor
-    if single.any():
-        sv = np.where(single)[0]
-        reaching = np.argmax(reach[:, sv], axis=0)
-        f[sv] = anchor_val[reaching]
-
-    multi = (n_reach >= 2) & ~is_anchor
-    if multi.any():
-        free = np.where(multi)[0]
-        dir_idx = np.concatenate([anchor_idx, np.where(single)[0]]).astype(np.int64)
-        dir_val = f[dir_idx]
-
-        L_csc = L.tocsc()
-        L_FF = L_csc[free, :][:, free]
-        L_FA = L_csc[free, :][:, dir_idx]
-        rhs = -np.asarray(L_FA @ dir_val).ravel()
-        try:
-            f_F = spla.spsolve(L_FF.tocsc(), rhs)
-        except Exception:
-            f_F, *_ = spla.lsqr(L_FF, rhs)
-        f[free] = f_F
-
-    return f
+    in_patch = n_reach >= 1
+    return _harmonic_min_dirichlet_on_patch(L, anchor_idx, anchor_val, in_patch)
 
 
 def harmonic_interpolate_bounded(
@@ -769,23 +765,14 @@ def harmonic_interpolate_bounded(
     radius: float,
     mode: str = "local",
 ) -> np.ndarray:
-    """Per-anchor radius harmonic on the cut mesh patch.
+    """Per-anchor radius harmonic on the accepted geodesic patch.
 
-    Two modes (see :func:`harmonic_interpolate_bounded_cached` for the cached
-    variant used by the viewer's hot path):
+    Vertices outside every anchor's geodesic ball stay NaN. Inside the union
+    of balls, solves for the harmonic field with anchor Dirichlet data that
+    minimises discrete Dirichlet energy (natural Neumann rim on the patch cut).
 
-    ``local`` (default)
-        * vertex out of every anchor's ball   -> NaN (untouched)
-        * vertex inside exactly one ball     -> that anchor's value (constant)
-        * vertex inside two-or-more balls    -> harmonic blend using anchors +
-          single-ball vertices as Dirichlet BC.
-
-    ``global``
-        Take the union of geodesic balls as the patch. Anchors are the only
-        Dirichlet vertices; every other patch vertex is an unknown of a
-        single harmonic system on the patch. The patch outer rim uses the
-        natural Neumann BC (∂f/∂n = 0) coming from sub-Laplacian extraction,
-        so a patch with one anchor uniformly equals that anchor's value.
+    ``mode`` is kept for API compatibility; ``"local"`` and ``"global"`` are
+    equivalent.
     """
     from scipy.sparse.csgraph import dijkstra
 
@@ -814,49 +801,8 @@ def harmonic_interpolate_bounded(
     dist = np.asarray(dist)  # shape (n_anchors, n_vertices)
     reach = dist <= r
     n_reach = reach.sum(axis=0)
-
-    f = np.full(n, np.nan, dtype=np.float64)
-    f[anchor_idx] = anchor_val
-
-    is_anchor = np.zeros(n, dtype=bool)
-    is_anchor[anchor_idx] = True
-
-    if mode == "global":
-        in_patch = n_reach >= 1
-        free_mask = in_patch & ~is_anchor
-        if free_mask.any():
-            free = np.where(free_mask)[0]
-            f_F = _solve_neumann_patch(L, free, anchor_idx, anchor_val)
-            f[free] = f_F
-        return f
-
-    # 1) Vertices inside exactly one ball get that anchor's value verbatim.
-    single = (n_reach == 1) & ~is_anchor
-    if single.any():
-        sv = np.where(single)[0]
-        reaching = np.argmax(reach[:, sv], axis=0)
-        f[sv] = anchor_val[reaching]
-
-    # 2) Vertices inside two or more balls are the unknowns of a harmonic
-    #    solve, with the anchors AND the single-ball vertices as Dirichlet BC
-    #    so the gradient meets the constant-fill regions continuously.
-    multi = (n_reach >= 2) & ~is_anchor
-    if multi.any():
-        free = np.where(multi)[0]
-        dir_idx = np.concatenate([anchor_idx, np.where(single)[0]]).astype(np.int64)
-        dir_val = f[dir_idx]
-
-        L_csc = L.tocsc()
-        L_FF = L_csc[free, :][:, free]
-        L_FA = L_csc[free, :][:, dir_idx]
-        rhs = -np.asarray(L_FA @ dir_val).ravel()
-        try:
-            f_F = spla.spsolve(L_FF.tocsc(), rhs)
-        except Exception:
-            f_F, *_ = spla.lsqr(L_FF, rhs)
-        f[free] = f_F
-
-    return f
+    in_patch = n_reach >= 1
+    return _harmonic_min_dirichlet_on_patch(L, anchor_idx, anchor_val, in_patch)
 
 
 def adaptive_k_per_anchor(

@@ -224,6 +224,7 @@ class CartoMeshViewer(OpenGLFrame):
 
         # Electrodes / spheres.
         self._elec_xyz_raw: np.ndarray = np.zeros((0, 3), dtype=np.float64)
+        self._elec_proj_raw: np.ndarray = np.zeros((0, 3), dtype=np.float64)
         self._elec_xyz_norm: np.ndarray = np.zeros((0, 3), dtype=np.float32)
         self._elec_xyz_proj_norm: np.ndarray = np.zeros((0, 3), dtype=np.float32)
         self._elec_global_idx: list[int] = []
@@ -233,9 +234,9 @@ class CartoMeshViewer(OpenGLFrame):
         self._hover_triangle: int | None = None
         self._hover_kind: str = "empty"
 
-        # Sphere display state. Default to surface-projected positions so the
-        # spheres actually sit on the mesh even when the raw electrode coords
-        # are recorded a few millimeters off the surface.
+        # Sphere display state. With ``use_projected``, spheres snap to the same
+        # mesh vertices used as harmonic anchors (not the raw VTK hit point on
+        # a triangle face, which can sit offset from the colormap extremum).
         self.sphere_radius_factor: float = 1.0
         self.use_projected: bool = True
         self._sphere_radius = self._SPHERE_RADIUS_FRAC
@@ -270,10 +271,9 @@ class CartoMeshViewer(OpenGLFrame):
         # interpolation radius = 10× mean edge so localized solves are fast).
         self._mean_edge: float = 0.0
 
-        # When True, every delta recompute uses the geodesic-ball cut but solves
-        # one harmonic system over the whole patch (Neumann at the rim). When
-        # False, the bounded cached/local path is used. The toolbar Global
-        # checkbox mirrors this flag.
+        # Bounded delta interpolation always minimises Dirichlet energy on the
+        # accepted geodesic patch (anchor Dirichlet, Neumann rim). The toolbar
+        # Global checkbox is kept for export/API compatibility.
         self.use_global_patch_harmonic: bool = False
 
         # Heavy delta interpolation runs in a single dedicated worker thread
@@ -327,6 +327,8 @@ class CartoMeshViewer(OpenGLFrame):
         self._cursor_pos: tuple[int, int] | None = None
         self._motion_after: str | None = None
         self._redraw_after_id: str | None = None
+        self._render_paused = False
+        self._pending_redraw = False
         # Timestamp + cursor position of the last successful pick. Used to
         # skip the synchronous pick render on click when the cursor is still
         # parked over the same spot as the last hover pick.
@@ -909,10 +911,36 @@ class CartoMeshViewer(OpenGLFrame):
         per_vert = np.repeat(rgb, 3, axis=0)
         self._pick_mesh_colors = np.ascontiguousarray(per_vert, dtype=np.uint8).reshape(-1)
 
+    def _anchor_source_xyz_raw(self) -> np.ndarray:
+        """3D positions used to pick mesh anchor vertices for interpolation."""
+        if self._elec_xyz_raw.shape[0] == 0:
+            return self._elec_xyz_raw
+        if (
+            self.use_projected
+            and self._elec_proj_raw.shape[0] == self._elec_xyz_raw.shape[0]
+        ):
+            return self._elec_proj_raw
+        return self._elec_xyz_raw
+
+    def _recompute_anchor_vidx(self) -> None:
+        """Map each electrode to the mesh vertex used as a harmonic anchor."""
+        if not self._mesh_loaded or self._elec_xyz_raw.shape[0] == 0:
+            self._anchor_vidx = None
+            return
+        try:
+            verts_raw = np.asarray(self.carto.vertices, dtype=np.float64)
+            pts = self._anchor_source_xyz_raw()
+            self._anchor_vidx = lap.map_points_to_vertices(verts_raw, pts)
+        except Exception:
+            traceback.print_exc()
+            self._anchor_vidx = None
+
     def _normalize_electrodes(self) -> None:
         if self._elec_xyz_raw.shape[0] == 0:
             self._elec_xyz_norm = np.zeros((0, 3), dtype=np.float32)
             self._elec_xyz_proj_norm = np.zeros((0, 3), dtype=np.float32)
+            self._elec_proj_raw = np.zeros((0, 3), dtype=np.float64)
+            self._anchor_vidx = None
             return
         norm = (self._elec_xyz_raw - self._mesh_center) / max(self._mesh_radius, 1e-9)
         self._elec_xyz_norm = norm.astype(np.float32)
@@ -921,15 +949,19 @@ class CartoMeshViewer(OpenGLFrame):
     def _compute_projected_positions(self) -> None:
         """Project raw electrode positions onto the closest mesh surface point.
 
-        Stored in normalized mesh coordinates so the renderer can use them
-        directly. Falls back to ``_elec_xyz_norm`` when the mesh isn't loaded
-        yet or the projection backend errors out.
+        Stored in normalized mesh coordinates for fallback display. Anchor
+        vertices and sphere positions use the nearest mesh vertex to each
+        projected point so drawn markers align with interpolated colormap
+        extrema at Dirichlet anchors.
         """
         if self._elec_xyz_raw.shape[0] == 0:
             self._elec_xyz_proj_norm = np.zeros((0, 3), dtype=np.float32)
+            self._elec_proj_raw = np.zeros((0, 3), dtype=np.float64)
+            self._anchor_vidx = None
             return
         if not self._mesh_loaded:
             self._elec_xyz_proj_norm = self._elec_xyz_norm.copy()
+            self._elec_proj_raw = self._elec_xyz_raw.copy()
             return
         try:
             verts_raw = np.asarray(self.carto.vertices, dtype=np.float64)
@@ -938,17 +970,29 @@ class CartoMeshViewer(OpenGLFrame):
         except Exception:
             traceback.print_exc()
             self._elec_xyz_proj_norm = self._elec_xyz_norm.copy()
+            self._elec_proj_raw = self._elec_xyz_raw.copy()
+            self._recompute_anchor_vidx()
             return
+        self._elec_proj_raw = np.asarray(projected, dtype=np.float64).reshape(-1, 3)
         self._elec_xyz_proj_norm = (
-            (projected - self._mesh_center) / max(self._mesh_radius, 1e-9)
+            (self._elec_proj_raw - self._mesh_center) / max(self._mesh_radius, 1e-9)
         ).astype(np.float32)
+        self._recompute_anchor_vidx()
 
     def _active_elec_positions(self) -> np.ndarray:
+        if not self.use_projected:
+            return self._elec_xyz_norm
         if (
-            self.use_projected
-            and self._elec_xyz_proj_norm.shape[0] == self._elec_xyz_norm.shape[0]
-            and self._elec_xyz_proj_norm.shape[0] > 0
+            self._anchor_vidx is not None
+            and self._mesh_loaded
+            and self._anchor_vidx.size == self._elec_xyz_raw.shape[0]
         ):
+            verts = np.asarray(self.carto.vertices, dtype=np.float64)
+            at_anchors = verts[self._anchor_vidx.astype(np.int64, copy=False)]
+            return (
+                (at_anchors - self._mesh_center) / max(self._mesh_radius, 1e-9)
+            ).astype(np.float32)
+        if self._elec_xyz_proj_norm.shape[0] > 0:
             return self._elec_xyz_proj_norm
         return self._elec_xyz_norm
 
@@ -1330,11 +1374,7 @@ class CartoMeshViewer(OpenGLFrame):
                 self._L = None
                 return None
         if self._anchor_vidx is None and self._elec_xyz_raw.size > 0:
-            try:
-                self._anchor_vidx = lap.map_points_to_vertices(V, self._elec_xyz_raw)
-            except Exception:
-                traceback.print_exc()
-                self._anchor_vidx = None
+            self._recompute_anchor_vidx()
         if self._anchor_vidx is None or self._anchor_vidx.size == 0:
             return None
 
@@ -1475,11 +1515,9 @@ class CartoMeshViewer(OpenGLFrame):
             traceback.print_exc()
             values = {}
 
-        # Decide mode for this pass on the Tk thread (cheap). Global no longer
-        # disables the geodesic cut — it now interpolates harmonically over
-        # the same union-of-balls patch the local mode uses, just with one
-        # harmonic system across the whole patch and natural Neumann BC at
-        # the patch rim (so a single anchor fills its patch uniformly).
+        # Bounded interpolation: union of geodesic balls = accepted patch.
+        # On that patch we minimise discrete Dirichlet energy with known
+        # values only at electrode anchors (natural Neumann rim on the cut).
         global_pass = bool(self.use_global_patch_harmonic)
         rad = self.interpolation_radius
         if rad is None or not np.isfinite(float(rad)) or float(rad) <= 0:
@@ -1607,11 +1645,7 @@ class CartoMeshViewer(OpenGLFrame):
 
         # 2) Anchor vertex index (electrode -> mesh vertex).
         if self._anchor_vidx is None and elec_raw is not None and getattr(elec_raw, "size", 0) > 0:
-            try:
-                self._anchor_vidx = lap.map_points_to_vertices(verts_raw, elec_raw)
-            except Exception:
-                traceback.print_exc()
-                self._anchor_vidx = None
+            self._recompute_anchor_vidx()
         if stale():
             return
 
@@ -2613,7 +2647,24 @@ class CartoMeshViewer(OpenGLFrame):
                 print(f"[CartoMeshViewer] mesh load failed: {exc}")
                 self._mesh_loaded = False
 
+    def set_render_paused(self, paused: bool) -> None:
+        self._render_paused = bool(paused)
+        if paused:
+            if self._redraw_after_id is not None:
+                try:
+                    self.after_cancel(self._redraw_after_id)
+                except Exception:
+                    pass
+                self._redraw_after_id = None
+            return
+        if self._pending_redraw:
+            self._pending_redraw = False
+            self._request_redraw()
+
     def redraw(self) -> None:
+        if self._render_paused:
+            self._pending_redraw = True
+            return
         if not _GL_AVAILABLE:
             return
         w = max(self.winfo_width(), 1)
@@ -2792,6 +2843,8 @@ class CartoMeshViewer(OpenGLFrame):
         self._request_redraw()
 
     def _on_motion(self, event) -> None:
+        if self._render_paused:
+            return
         self._cursor_pos = (event.x, event.y)
         # While the user is mid-drag we don't want extra pick passes fighting
         # for the GL context - the rotate/pan redraw already covers visuals.
@@ -2808,6 +2861,8 @@ class CartoMeshViewer(OpenGLFrame):
 
     def _dispatch_hover_pick(self) -> None:
         self._motion_after = None
+        if self._render_paused:
+            return
         if self._cursor_pos is None or not self._mesh_loaded:
             return
         # Skip if cursor hasn't moved since the last successful pick.
@@ -2830,6 +2885,9 @@ class CartoMeshViewer(OpenGLFrame):
 
     # ----------------------------------------------------------- misc
     def _request_redraw(self) -> None:
+        if self._render_paused:
+            self._pending_redraw = True
+            return
         # Coalesce bursts of redraw requests (hover + mesh sync) so each event
         # loop tick does at most one GL flush instead of N synchronous exposes.
         if self._redraw_after_id is not None:
@@ -2905,6 +2963,14 @@ class CartoMeshViewer(OpenGLFrame):
         if new == self.use_projected:
             return
         self.use_projected = new
+        self._recompute_anchor_vidx()
+        self._invalidate_interp_caches()
+        if (
+            self.interpolation_enabled
+            and self._mesh_loaded
+            and str(self.scalar_field).startswith("delta:")
+        ):
+            self._compute_delta_interpolated()
         self._request_redraw()
 
     def toggle_projection(self) -> None:
@@ -2913,6 +2979,12 @@ class CartoMeshViewer(OpenGLFrame):
     def recompute_projection(self) -> None:
         if self._mesh_loaded:
             self._compute_projected_positions()
+            self._invalidate_interp_caches()
+            if (
+                self.interpolation_enabled
+                and str(self.scalar_field).startswith("delta:")
+            ):
+                self._compute_delta_interpolated()
             self._request_redraw()
 
     def set_scalar_field(self, field: str) -> None:

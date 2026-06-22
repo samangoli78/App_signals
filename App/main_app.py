@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import ImageGrab
 import pandas as pd
-import librosa
 from tkinter import filedialog
 from tkinter import messagebox
 import threading
@@ -28,6 +27,8 @@ from .session_store import SessionStore
 from .mediators.table_mediator import TableAppGlue
 from .mediators.mesh_mediator import MeshAppGlue
 from .viewer3d import CartoMeshPanel
+from .ui.left_ribbon import build_app_shell, build_left_ribbon
+from .ui.resize_pause import attach_resize_pause, install_canvas_draw_guard
 from .ml_inference import (
     MLBundle,
     extract_features_from_delta_entry,
@@ -45,6 +46,122 @@ from .ml_inference import (
 # interpolation pass.
 ML_PEAK_TO_PEAK_MIN_MV = 0.1
 
+
+def _build_table_and_plot_layout(app, parent):
+    # ---- vertical split: table on top, plots + mesh below
+    panned_window = ttk.PanedWindow(parent, orient="vertical")
+    panned_window.pack(expand=True, fill=tk.BOTH)
+    # ---- table pane frame
+    frame3 = tk.Frame(parent)
+    panned_window.add(frame3, weight=1)
+    # ---- annotation table widget
+    table = TableWidget(frame3, app.Table)
+    table.pack(fill="both", expand=True)
+    # ---- table column defaults (Reject / POS / NEG)
+    tv = table.tree
+    tv.defaults = {1: ["Reject", "POS", "NEG"]}
+
+    # ---- horizontal split: matplotlib plots left, 3D mesh right
+    # Horizontal split for the lower pane: matplotlib plots on the left,
+    # OpenGL Carto mesh viewer on the right. Wrapping the existing plot
+    # frame in a ttk.PanedWindow lets the user resize the 3D pane without
+    # touching any of the original plotting code paths below.
+    plot_pane = ttk.PanedWindow(panned_window, orient="horizontal")
+    panned_window.add(plot_pane, weight=2)
+
+    # ---- matplotlib signals / plots frame
+    frame1 = tk.Frame(plot_pane, pady=5, background="white")
+    plot_pane.add(frame1, weight=3)
+
+    # ---- 3D Carto mesh viewer frame
+    # 3D mesh viewer pane. Built defensively: if the Carto object can't
+    # provide a mesh (no .mesh file, missing OpenGL drivers, etc.) the
+    # panel falls back to a label instead of crashing the whole app.
+    frame_mesh = tk.Frame(plot_pane, background="black")
+    plot_pane.add(frame_mesh, weight=2)
+    mesh_panel = None
+    try:
+        # ---- CartoMeshPanel (OpenGL mesh + toolbar)
+        mesh_panel = CartoMeshPanel(frame_mesh, app.carto)
+        mesh_panel.pack(fill="both", expand=True)
+        # ---- link table rows to mesh spheres (mesh_glue mediator)
+        # Hook the mediator: spheres at every table row, click <-> select.
+        try:
+            app.mesh_glue.attach(mesh_panel)
+        except Exception:
+            traceback.print_exc()
+    except Exception as _mesh_exc:
+        traceback.print_exc()
+        # ---- fallback label when 3D viewer fails to load
+        tk.Label(
+            frame_mesh,
+            text=f"3D viewer disabled: {_mesh_exc}",
+            bg="black",
+            fg="white",
+            wraplength=240,
+            justify="left",
+        ).pack(fill="both", expand=True, padx=8, pady=8)
+    return {
+        "table": table,
+        "frame1": frame1,
+        "frame_mesh": frame_mesh,
+        "mesh_panel": mesh_panel,
+        "vertical_pane": panned_window,
+        "plot_pane": plot_pane,
+    }
+
+
+def _init_patch_ui_state():
+    # ---- cached per-section patch dv/ds results
+    # Per-patch dv/ds state. Populated by "Compute patch dv/ds":
+    #   patch_global_results = {section_i: {window_type: {dvds_patch, ...}}}
+    # A "patch" is one acquisition take/section. When results exist,
+    # set_figure adds a 4th "dvds" subplot under the bipolar axis; a
+    # window-type selector + time slider drive the cached |dV/ds| field
+    # on the 3D mesh, and the take owning the currently-navigated point
+    # is the active patch (mesh + subplot follow navigation).
+    return {
+        "patch_global_results": {},
+        # ---- active interest window type (stim / SR / …)
+        "patch_active_window": None,
+        # ---- time index within active patch window
+        "patch_time_index": 0,
+        # ---- patch time slider widget (created later in set_figure)
+        "_patch_slider": None,
+        # ---- patch window-type combobox widget
+        "_patch_window_combo": None,
+        # ---- patch window-type StringVar
+        "_patch_window_var": None,
+        # ---- whether patch preview is shown on 3D mesh
+        "_patch_preview_on": False,
+        # ---- vertical cursor line on dv/ds subplot
+        "_patch_cursor_line": None,
+        # ---- shared Laplacian / graph operators (lazy init)
+        # Lazy per-patch compute: shared mesh operators are built once and
+        # reused; each take/section is computed on first visit and cached in
+        # ``patch_global_results`` so re-visits are instant.
+        "_patch_ops": None,
+        # ---- patch dv/ds mode enabled flag
+        "_patch_mode_on": False,
+        # ---- sections currently computing in background
+        "_patch_sections_computing": set(),
+    }
+
+
+def _init_startup_state(app, name="Saman"):
+    return {
+        "name": name,
+        "cont": app.carto.cont,
+        "forcefull": False,
+        "is_running": True,
+        "triple_active": False,
+        "VT_active": False,
+        "start_x_y": [],
+        "direction": 1,
+        "ml_bundle": None,
+        "ml_selected_models": [],
+        "show_original_labels": False,
+    }
 
 
 class App(tk.Tk):
@@ -68,21 +185,14 @@ class App(tk.Tk):
     store_cls = SessionStore
     table_glue_cls = TableAppGlue
     mesh_glue_cls = MeshAppGlue
-    def __init__(self, name="Saman", carto:Carto=None):
+    def __init__(self, carto: Carto = None):
         # __init__ is the object constructor: runs once when App(...) is created.
-        # `name="Saman"` gives a default argument.
         # `carto: Carto` is a type hint for readability/editor assistance.
         # `=None` means the parameter is optional at call time.
-        self.forcefull=False
+        # Runtime UI state (name, cont alias, protocol flags, ML slots) is set in
+        # ``start()`` via ``_init_startup_state`` so ``__init__`` only wires data.
         self.apps.append(self)
-        self.is_running=True
         self.carto = carto
-        self.cont = self.carto.cont
-        self.triple_active=False
-        self.name=name
-        self.VT_active=False
-        self.check_boxes={}
-        self.librosa = librosa
         # Composition: this class owns helper objects and delegates specialized work to them.
         # This keeps the main window class smaller and easier to maintain.
         self.session_store = self.store_cls()
@@ -97,11 +207,7 @@ class App(tk.Tk):
             traceback.print_exc()
         self.table_glue = self.table_glue_cls(self)
         self.mesh_glue = self.mesh_glue_cls(self)
-        self.mesh_panel = None
         self.i, self.j = 0, 0
-        self._compute_all_running = False
-        self._compute_all_queue: list[int] = []
-        self._compute_all_saved_ij = (0, 0)
         self.Table=[]
         self.i_j_to_index(labels="hide")
         self.creating_delta()
@@ -114,11 +220,6 @@ class App(tk.Tk):
         # ``vals[-1] = delta_summary`` write keeps pointing at the right cell.
         self.Table=pd.concat([self.Table,pd.DataFrame(np.full(len(self.to_i_j), "", dtype=object),columns=["Prediction"])],axis=1)
         self.Table=pd.concat([self.Table,pd.DataFrame(np.zeros(len(self.to_i_j)),columns=["delta"])],axis=1)
-        # ML state. ``ml_bundle`` is loaded lazily from a joblib file (see
-        # ``model/ml_model_io.py``); ``ml_selected_models`` is the list of
-        # bundle entries currently used for prediction. Empty list => off.
-        self.ml_bundle: MLBundle | None = None
-        self.ml_selected_models: list[str] = []
 
     def creating_delta(self):
         #delta is a list of dictionaries that contains the information about the stimulations and sinus signals.
@@ -157,165 +258,91 @@ class App(tk.Tk):
                 
 
 
-    def start(self):
+    def start(self, name="Saman"):
 
         # super() calls parent class behavior (tk.Tk initialization) before custom setup.
         super().__init__()
         print("start")
-        self.start_x_y = []
-        self.direction=1   
-        self.geometry("600x600")
+        startup = _init_startup_state(self, name)
+        self.name = startup["name"]
+        self.cont = startup["cont"]
+        self.forcefull = startup["forcefull"]
+        self.is_running = startup["is_running"]
+        self.triple_active = startup["triple_active"]
+        self.VT_active = startup["VT_active"]
+        self.start_x_y = startup["start_x_y"]
+        self.direction = startup["direction"]
+        self.ml_bundle = startup["ml_bundle"]
+        self.ml_selected_models = startup["ml_selected_models"]
+        self.show_original_labels = startup["show_original_labels"]
+        self._compute_all_running = False
+        self._compute_all_queue = []
+        self._compute_all_saved_ij = (0, 0)
+        # ---- main window size and title
+        self.geometry("900x700")
         self.title(f"My {self.name} APP")
 
-        self.frame=tk.Frame(self,padx=5,pady=10,background="grey")
-        self.frame.pack(fill="x",expand=False)
-        self.button_dropdown=tk.Button(self.frame,text="Options",command=self.drop_down)
-        self.button_dropdown.pack(side=tk.LEFT,padx=10)
-        self.label = tk.Label(self.frame, text=f"point {self.cont[self.i][0]['point number'].values[self.j]}",bg="grey",fg="white")
-        self.label.config(font=("timesnewroman", 10))
-        self.label.pack(fill="x",side="left",padx=10)
-        
-        self.check_boxes={"Energy":None,"Only_Green":None}
-        for key in self.check_boxes.keys():
-            self.check_boxes[key]=tk.IntVar()
-            check_box=tk.Checkbutton(self.frame,variable=self.check_boxes[key],command=self.checker,text=key,font=("timesnewroman",10))
-            check_box.pack(side=tk.LEFT,fill="x", expand=False)
-        self.button_trip=tk.Button(self.frame,text="Switch to Triple Extra Protocol",command=self.triple_protocol)
-        self.button_trip.pack(side=tk.LEFT,padx=10)
-        self.button_VT=tk.Button(self.frame,text="Switch to VT Protocol",command=self.VT_protocol)
-        self.button_VT.pack(side=tk.LEFT,padx=10)
-        # lambda creates a tiny anonymous function used as a callback.
-        self.button_screen=tk.Button(self.frame,text="screen shot",command=lambda name=None:self.capture_window(name))
-        self.button_screen.pack(side=tk.LEFT,padx=10)
-        self.button_compute_all = tk.Button(
-            self.frame,
-            text="Compute all",
-            command=self._compute_all_clicked,
-            font=("timesnewroman", 10),
-        )
-        self.button_compute_all.pack(side=tk.LEFT, padx=10)
-        self.button_global_patch = tk.Button(
-            self.frame,
-            text="Compute patch dv/ds",
-            command=self._compute_global_patch_clicked,
-            font=("timesnewroman", 10),
-        )
-        self.button_global_patch.pack(side=tk.LEFT, padx=10)
-        # ML toolbar row: model dropdown + loader + predicted-label display.
-        # Lives in its own frame so the main toolbar above doesn't overflow
-        # horizontally when many models / long names are listed.
-        self.frame_ml = tk.Frame(self, padx=5, pady=4, background="grey")
-        self.frame_ml.pack(fill="x", expand=False)
-        tk.Label(
-            self.frame_ml, text="Model:", bg="grey", fg="white",
-            font=("timesnewroman", 10),
-        ).pack(side=tk.LEFT, padx=(0, 4))
-        self.ml_model_var = tk.StringVar(value="(none)")
-        self.ml_combo = ttk.Combobox(
-            self.frame_ml,
-            textvariable=self.ml_model_var,
-            values=["(none)"],
-            state="readonly",
-            width=24,
-        )
-        self.ml_combo.pack(side=tk.LEFT, padx=4)
-        self.ml_combo.bind("<<ComboboxSelected>>", self._on_ml_model_change)
-        self.button_ml_load = tk.Button(
-            self.frame_ml,
-            text="Load model…",
-            command=self._open_ml_dialog,
-            font=("timesnewroman", 10),
-        )
-        self.button_ml_load.pack(side=tk.LEFT, padx=4)
-        self.pred_label = tk.Label(
-            self.frame_ml,
-            text="Predicted: —",
-            bg="grey",
-            fg="white",
-            font=("timesnewroman", 10, "bold"),
-        )
-        self.pred_label.pack(side=tk.LEFT, padx=10)
-        # Conduction-velocity compute is independent of ML prediction but
-        # sits in the same row to group "post-processing" actions together.
-        self.button_compute_cv = tk.Button(
-            self.frame_ml,
-            text="Compute Conduction Velocity",
-            command=self._compute_conduction_velocity_clicked,
-            font=("timesnewroman", 10),
-        )
-        self.button_compute_cv.pack(side=tk.LEFT, padx=10)
+        # ---- collapsible resizable left ribbon + main content split
+        shell = build_app_shell(self)
+        ribbon = build_left_ribbon(self, shell["ribbon_column"])
+        self.label = ribbon["label"]
+        self.check_boxes = ribbon["check_boxes"]
+        self.button_trip = ribbon["button_trip"]
+        self.button_VT = ribbon["button_VT"]
+        self.button_dropdown = ribbon["button_dropdown"]
+        self.button_compute_all = ribbon["button_compute_all"]
+        self.button_global_patch = ribbon["button_global_patch"]
+        self.button_compute_cv = ribbon["button_compute_cv"]
+        self.ml_model_var = ribbon["ml_model_var"]
+        self.ml_combo = ribbon["ml_combo"]
+        self.pred_label = ribbon["pred_label"]
+        self.show_original_labels_var = ribbon["show_original_labels_var"]
+
+        layout = _build_table_and_plot_layout(self, shell["content_host"])
+        self.table = layout["table"]
+        self.frame1 = layout["frame1"]
+        self.mesh_panel = layout["mesh_panel"]
+        # ---- scan model/ folder for joblib bundles (after table exists)
         # Auto-discover joblib bundles in the sibling ``model/`` folder so the
         # dropdown can offer them without forcing the user to file-dialog
         # every time. Selection stays at "(none)" until the user picks one.
         self._refresh_ml_discovery()
-        self.panned_window=ttk.PanedWindow(self,orient="vertical")
-        self.panned_window.pack(expand=True,fill=tk.BOTH)
-        self.frame3=tk.Frame(self)
-        self.panned_window.add(self.frame3,weight=1)
-        self.table=TableWidget(self.frame3,self.Table)
-        self.table.pack(fill="both", expand=True)  
-        tv = self.table.tree
-        tv.defaults = {1: ["Reject", "POS", "NEG"]}
-        
 
-        # Horizontal split for the lower pane: matplotlib plots on the left,
-        # OpenGL Carto mesh viewer on the right. Wrapping the existing plot
-        # frame in a ttk.PanedWindow lets the user resize the 3D pane without
-        # touching any of the original plotting code paths below.
-        self.plot_pane = ttk.PanedWindow(self.panned_window, orient="horizontal")
-        self.panned_window.add(self.plot_pane, weight=2)
+        for key, value in _init_patch_ui_state().items():
+            setattr(self, key, value)
 
-        self.frame1=tk.Frame(self.plot_pane,pady=5,background="white")
-        self.plot_pane.add(self.frame1, weight=3)
-
-        # 3D mesh viewer pane. Built defensively: if the Carto object can't
-        # provide a mesh (no .mesh file, missing OpenGL drivers, etc.) the
-        # panel falls back to a label instead of crashing the whole app.
-        self.frame_mesh = tk.Frame(self.plot_pane, background="black")
-        self.plot_pane.add(self.frame_mesh, weight=2)
-        try:
-            self.mesh_panel = CartoMeshPanel(self.frame_mesh, self.carto)
-            self.mesh_panel.pack(fill="both", expand=True)
-            # Hook the mediator: spheres at every table row, click <-> select.
-            try:
-                self.mesh_glue.attach(self.mesh_panel)
-            except Exception:
-                traceback.print_exc()
-        except Exception as _mesh_exc:
-            traceback.print_exc()
-            tk.Label(
-                self.frame_mesh,
-                text=f"3D viewer disabled: {_mesh_exc}",
-                bg="black", fg="white", wraplength=240, justify="left",
-            ).pack(fill="both", expand=True, padx=8, pady=8)
-            self.mesh_panel = None
-
-        # Per-patch dv/ds state. Populated by "Compute patch dv/ds":
-        #   patch_global_results = {section_i: {window_type: {dvds_patch, ...}}}
-        # A "patch" is one acquisition take/section. When results exist,
-        # set_figure adds a 4th "dvds" subplot under the bipolar axis; a
-        # window-type selector + time slider drive the cached |dV/ds| field
-        # on the 3D mesh, and the take owning the currently-navigated point
-        # is the active patch (mesh + subplot follow navigation).
-        self.patch_global_results: dict = {}
-        self.patch_active_window: str | None = None
-        self.patch_time_index: int = 0
-        self._patch_slider = None
-        self._patch_window_combo = None
-        self._patch_window_var = None
-        self._patch_preview_on = False
-        self._patch_cursor_line = None
-        # Lazy per-patch compute: shared mesh operators are built once and
-        # reused; each take/section is computed on first visit and cached in
-        # ``patch_global_results`` so re-visits are instant.
-        self._patch_ops = None
-        self._patch_mode_on = False
-        self._patch_sections_computing: set[int] = set()
-
+        # ---- create matplotlib figure and axes
         # self.axes is a dictionary that contains the axes objects for the top, mid, and bottom axes.
         self.set_figure()
+        install_canvas_draw_guard(self)
+        resize_watch = [
+            self,
+            self.frame1,
+            layout["frame_mesh"],
+            shell["ribbon_shell"],
+            shell["content_host"],
+        ]
+        viewer = getattr(self.mesh_panel, "viewer", None) if self.mesh_panel else None
+        if viewer is not None:
+            resize_watch.append(viewer)
+        resize_panes = [
+            shell["outer_pane"],
+            layout["vertical_pane"],
+            layout["plot_pane"],
+        ]
+        mesh_ribbon = getattr(self.mesh_panel, "ribbon_pane", None) if self.mesh_panel else None
+        if mesh_ribbon is not None:
+            resize_panes.append(mesh_ribbon)
+        attach_resize_pause(
+            self,
+            panes=resize_panes,
+            watch_widgets=resize_watch,
+        )
+        # ---- legend canvases under plots
         self._build_legend_canvases()
+        # ---- keyboard / mouse bindings
         self.main()
+        # ---- initial plot draw
         self.plot()
         
 
@@ -347,27 +374,26 @@ class App(tk.Tk):
             self.button_VT.config(text="Switch to VT Protocol")
         self.update_plot()
         
-    def set_figure(self, with_dvds=False, mod=False):
+    def set_figure(self, with_dvds=False):
         """(Re)build the matplotlib figure embedded in ``frame1``.
 
         Normally three stacked subplots (``top`` unipolar, ``mid`` bipolar,
         ``bot`` reference). When ``with_dvds`` is True a 4th subplot ``dvds``
         is inserted directly under the bipolar axis (order top, mid, dvds,
-        bot) for the global-patch dV/ds curve. ``mod`` first clears every
-        existing widget from ``frame1`` (used when rebuilding the layout).
+        bot) for the global-patch dV/ds curve. Existing ``frame1`` widgets
+        and the previous figure are cleared first.
         """
-        if mod:
-            for widget in self.frame1.winfo_children():
-                widget.destroy()
-            self._patch_slider = None
-            self._patch_window_combo = None
-            self._patch_cursor_line = None
-            prev = getattr(self, "fig", None)
-            if prev is not None:
-                try:
-                    plt.close(prev)
-                except Exception:
-                    traceback.print_exc()
+        for widget in self.frame1.winfo_children():
+            widget.destroy()
+        self._patch_slider = None
+        self._patch_window_combo = None
+        self._patch_cursor_line = None
+        prev = getattr(self, "fig", None)
+        if prev is not None:
+            try:
+                plt.close(prev)
+            except Exception:
+                traceback.print_exc()
 
         self.with_dvds = bool(with_dvds)
         keys = ["top", "mid", "dvds", "bot"] if with_dvds else ["top", "mid", "bot"]
@@ -387,6 +413,7 @@ class App(tk.Tk):
         self._fig_nrows = nrows
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame1)
         self.canvas.get_tk_widget().grid(column=0,row=0,rowspan=nrows,sticky=tk.NSEW)
+        install_canvas_draw_guard(self)
 
     def _build_legend_canvases(self):
         """(Re)create the per-axis legend canvases and grid weights.
@@ -453,6 +480,45 @@ class App(tk.Tk):
 
     def checker(self):
         self.update_plot()
+
+    def _original_labels_flat(self) -> list:
+        labels = []
+        for section in self.labels_memory:
+            labels.extend(section)
+        return labels
+
+    def _delta_text_for_table(self, delt) -> str:
+        summary = self._delta_summary_from_entry(delt)
+        if isinstance(summary, list):
+            return ", ".join(map(str, summary))
+        return str(summary)
+
+    def _sync_original_label_column(self) -> None:
+        """Add or remove the read-only ``original_label`` table column in place."""
+        col = "original_label"
+        table = getattr(self, "table", None)
+        if table is None:
+            return
+        tv = table.tree
+        labels = self._original_labels_flat()
+        if self.show_original_labels:
+            after = "label_color" if "label_color" in list(tv["columns"]) else None
+            tv.insert_column(col, labels, after=after)
+            if col in self.Table.columns:
+                self.Table[col] = labels
+            elif "label_color" in self.Table.columns:
+                loc = self.Table.columns.get_loc("label_color") + 1
+                self.Table.insert(loc, col, labels)
+            else:
+                self.Table[col] = labels
+        else:
+            tv.remove_column(col)
+            if col in self.Table.columns:
+                self.Table = self.Table.drop(columns=[col])
+
+    def _toggle_original_labels(self) -> None:
+        self.show_original_labels = bool(self.show_original_labels_var.get())
+        self._sync_original_label_column()
 
 
     def on_right_click(self, event):
@@ -665,7 +731,7 @@ class App(tk.Tk):
 
         # Rebuild the figure with the 4th dv/ds subplot, then re-create the
         # legend canvases, event bindings, and the slider/selector controls.
-        self.set_figure(with_dvds=True, mod=True)
+        self.set_figure(with_dvds=True)
         self._build_legend_canvases()
         self._bind_canvas_events()
         self._build_patch_controls(order)
@@ -1160,17 +1226,25 @@ class App(tk.Tk):
             return ""
 
     def _refresh_table_from_delta(self):
-        in_table = []
+        delta_texts = []
         labels = []
         for index, delt in enumerate(self.delta):
             labels.append(self._delta_label_from_entry(index, delt))
-            in_table.append(self._delta_summary_from_entry(delt))
+            delta_texts.append(self._delta_text_for_table(delt))
 
-        self.Table["delta"] = pd.Series(in_table)
+        self.Table["delta"] = pd.Series(delta_texts)
         self.Table["label_color"] = pd.Series(labels)
-        self.table.tree.init_from_df(self.Table)
-        # Re-label everything: ``init_from_df`` rebuilds the tree from
-        # ``self.Table``, so the Prediction column needs to be repopulated.
+        tv = self.table.tree
+        tv.update_column_values("delta", delta_texts)
+        tv.update_column_values("label_color", labels)
+        if self.show_original_labels:
+            orig = self._original_labels_flat()
+            cols = list(tv["columns"])
+            if "original_label" in cols:
+                tv.update_column_values("original_label", orig)
+                self.Table["original_label"] = orig
+            else:
+                self._sync_original_label_column()
         try:
             self._refresh_all_predictions()
         except Exception:
@@ -1294,13 +1368,16 @@ class App(tk.Tk):
                 traceback.print_exc()
 
     def _clear_prediction_column(self) -> None:
+        table = getattr(self, "table", None)
+        if table is None:
+            return
         try:
             col_loc = self.Table.columns.get_loc("Prediction")
         except Exception:
             return
         self.Table.iloc[:, col_loc] = ""
         try:
-            tv = self.table.tree
+            tv = table.tree
             cols = list(tv["columns"])
             if "Prediction" not in cols:
                 return

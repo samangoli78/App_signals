@@ -80,7 +80,7 @@ def apply_closing(binary_signal, structure_size=5):
     return binary_closing(binary_signal, structure=structure)
 
 
-def find_start(x, y, length=7, ax=None, operation="min", Th=0.2, alpha=0.5):
+def find_start(x, y, length=7, ax=None, operation="min", Th=0.2, alpha=0.5, pick="longest"):
     y_paded = zero_pad_signal(y, pad_left=10, pad_right=10)
     Th = otsu_threshold(y_paded, alpha=alpha)
     out = np.array(y)
@@ -117,6 +117,11 @@ def find_start(x, y, length=7, ax=None, operation="min", Th=0.2, alpha=0.5):
             in_1 = False
             if end - start > 5:
                 output.append([start - 10, end - 10, end - start])
+    if not output:
+        return None
+    if pick == "earliest":
+        best = min(output, key=lambda val: val[0])
+        return [best[0], best[1]]
     index = np.argsort(np.array([val[2] for val in output]))
     out1 = []
     for ii in index:

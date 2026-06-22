@@ -31,7 +31,7 @@ class Triple_Extra:
             peaks on M1 − M2, period".
           * Sinus rhythm window is anchored on a single Q (Pan–Tompkins on
             the reference channel):
-              start = Q − 600 ms, end = Q + 200 ms (total 800 ms).
+              start = Q − 300 ms, end = Q + 100 ms (total 400 ms).
             The chosen Q is the **last** valid one before the first stim
             window; if none exists, the **first** valid one after the last
             stim window.
@@ -205,11 +205,10 @@ class Triple_Extra:
 
         self.sinus_ref = P1_combined
 
-        # SR window: strictly [Q − 600 ms, Q + 200 ms]. The onset/offset
-        # refinement (find_start) still narrows the analysed segment inside
-        # this window downstream.
-        pre_ms = 600
-        post_ms = 200
+        # SR coarse window: [Q − 300 ms, Q + 100 ms]. ``find_start`` in the
+        # presenter narrows onset/offset inside this ROI.
+        pre_ms = 300
+        post_ms = 100
         duration = int((pre_ms + post_ms) * self.fs / 1000)
         pre_n = int(pre_ms * self.fs / 1000)
         sinus_start = [max(0, int(ii) - pre_n) for ii in P1_combined]

@@ -8,6 +8,7 @@ import re
 import traceback
 
 import numpy as np
+import librosa
 from matplotlib.patches import Rectangle
 from scipy.signal import find_peaks
 
@@ -23,6 +24,12 @@ from ..utility import (
     r_q_markers_for_display,
     stim_pulse_exclusion_spans_signed_m,
 )
+from ..utility.signals_ecg import pan_tompkins_r_indices, q_indices_before_r
+
+SR_PRE_MS = 300
+SR_POST_MS = 100
+STIM_SLICE_HEAD = 8
+STIM_SLICE_TAIL = 10
 
 
 def _decimate_xy(x: np.ndarray, y: np.ndarray, max_pts: int = 12_000) -> tuple[np.ndarray, np.ndarray]:
@@ -483,11 +490,6 @@ class PlotPresenter(BasePlotPresenter):
                 c1["voltage_stim"].append(float(yy1.max() - yy1.min()))
                 c1["deflection_stim"].append(False)
 
-        sinus_starts = list(egm.sinus_start)
-        sinus_durs = list(egm.sinus_duration)
-        sinus_refs = list(egm.sinus_ref)
-        # The stim_start[0] / stim_start[-1] window-clamping logic from the
-        # original: skip sinus windows that fall inside the stim block.
         if stim_starts:
             stim_block_lo = int(stim_starts[0])
             stim_block_hi = int(stim_starts[-1]) + int(stim_durs[-1])
@@ -495,88 +497,80 @@ class PlotPresenter(BasePlotPresenter):
             stim_block_lo = -1
             stim_block_hi = -1
 
-        for ii in range(len(sinus_starts)):
-            dont_save = False
-            start = int(sinus_starts[ii])
-            end = int(sinus_starts[ii]) + int(sinus_durs[ii])
-            # Reject sinus windows that overlap the stim block in any way:
-            # the new 800 ms SR window (-600..+200 ms around Q) can clip into
-            # stim from either side, and analysing pacing inside an SR window
-            # corrupts onset/offset detection downstream.
-            if stim_block_lo >= 0:
-                # Q itself inside stim → already filtered upstream, but guard.
-                ref_idx = int(sinus_refs[ii]) if ii < len(sinus_refs) else -1
-                if stim_block_lo <= ref_idx < stim_block_hi:
-                    continue
-                # Clip the SR window so it never overlaps the stim block.
-                if end > stim_block_lo and start < stim_block_lo:
-                    end = stim_block_lo
-                if start < stim_block_hi and end > stim_block_hi:
-                    start = stim_block_hi
-                if end - start < 200:
-                    continue
-            xx = x[start:end]
-            yy = y2[start:end]
-            yy1 = yy
-            if xx.size == 0 or yy.size == 0:
-                continue
-            x_energy, y_low, y_high, _y_total = self._energy_compute(xx, yy, ep)
-            if cached_delta == 0 or forcefull:
-                output = find_start(
-                    x_energy, y_low, length=2, ax=None, operation=None, Th=0.15, alpha=TH
-                )
-                if output is not None:
-                    start_n, end_n = int(start + output[0]), int(start + output[1])
-                else:
-                    start_n, end_n = start, end
-                    dont_save = True
-            else:
-                try:
-                    memory = cached_delta[2]["sinus"][ii]
-                except Exception:
-                    continue
-                if isinstance(memory, list) and len(memory) == 2:
-                    start_n, end_n = int(memory[0]), int(memory[1])
-                else:
-                    start_n, end_n = start, end
-                    dont_save = True
-            xx_w = x[start_n:end_n]
-            yy_w = y2[start_n:end_n]
-            ok = bool(yy1.max() - yy1.min() > 0.05 and not dont_save)
-            defl = None
-            pi_pos = pi_neg = None
-            sig_pos = sig_neg = None
-            if ok:
-                pi_pos, sig_pos = compute_deflection_peaks(bp_signal, start_n, end_n)
-                pi_neg, sig_neg = compute_deflection_peaks(-bp_signal, start_n, end_n)
-                defl = int(len(pi_pos) + len(pi_neg))
+        # SR: locate Q, delineate inside [Q−300 ms, Q+100 ms] with stim params.
+        cached_sinus = None
+        if (
+            cached_delta != 0
+            and isinstance(cached_delta, list)
+            and len(cached_delta) >= 3
+            and isinstance(cached_delta[2], dict)
+        ):
+            sinus_mem = cached_delta[2].get("sinus") or []
+            if sinus_mem:
+                cached_sinus = sinus_mem[0]
+
+        ref_idx = self._pick_sr_q_index(
+            reference_signal,
+            stim_block_lo,
+            stim_block_hi,
+            egm,
+        )
+        sr_out = None
+        if ref_idx is not None:
+            sr_out = self._delineate_sr_at_q(
+                x,
+                y2,
+                bp_signal,
+                int(ref_idx),
+                cached_sinus,
+                forcefull,
+                TH,
+                ep,
+            )
+
+        if sr_out is not None:
+            ii = 0
             sinus_results.append({
                 "ii": int(ii),
-                "start": start, "end": end,
-                "start_n": int(start_n), "end_n": int(end_n),
-                "voltage": float(yy1.max() - yy1.min()),
-                "xx_w": xx_w, "yy_w": yy_w,
-                "x_energy": x_energy, "y_low": y_low, "y_high": y_high,
-                "ok": ok, "dont_save": bool(dont_save), "defl": defl,
-                "pi_pos": pi_pos, "sig_pos": sig_pos,
-                "pi_neg": pi_neg, "sig_neg": sig_neg,
-                "sinus_ref": int(sinus_refs[ii]) if ii < len(sinus_refs) else 0,
+                "start": int(sr_out["coarse_start"]),
+                "end": int(sr_out["coarse_end"]),
+                "start_n": int(sr_out["start_n"]),
+                "end_n": int(sr_out["end_n"]),
+                "voltage": float(sr_out["voltage"]),
+                "xx_w": sr_out["xx_w"],
+                "yy_w": sr_out["yy_w"],
+                "x_energy": sr_out["x_energy"],
+                "y_low": sr_out["y_low"],
+                "y_high": sr_out["y_high"],
+                "ok": bool(sr_out["ok"]),
+                "dont_save": bool(sr_out["dont_save"]),
+                "defl": sr_out["defl"],
+                "pi_pos": sr_out["pi_pos"],
+                "sig_pos": sr_out["sig_pos"],
+                "pi_neg": sr_out["pi_neg"],
+                "sig_neg": sr_out["sig_neg"],
+                "sinus_ref": int(sr_out["ref_idx"]),
             })
-            if ok:
-                c1["refs_sinus"].append(int(sinus_refs[ii]) if ii < len(sinus_refs) else 0)
-                c1["sinus"].append([int(start_n), int(end_n)])
-                c1["voltage_sinus"].append(float(yy1.max() - yy1.min()))
-                c1["deflection_sinus"].append(int(defl))
-            elif dont_save:
-                c1["refs_sinus"].append(int(sinus_refs[ii]) if ii < len(sinus_refs) else 0)
+            if sr_out["ok"]:
+                c1["refs_sinus"].append(int(sr_out["ref_idx"]))
+                c1["sinus"].append([int(sr_out["start_n"]), int(sr_out["end_n"])])
+                c1["voltage_sinus"].append(float(sr_out["voltage"]))
+                c1["deflection_sinus"].append(int(sr_out["defl"]))
+            elif sr_out["dont_save"]:
+                c1["refs_sinus"].append(int(sr_out["ref_idx"]))
                 c1["sinus"].append(False)
                 c1["voltage_sinus"].append(False)
                 c1["deflection_sinus"].append(False)
             else:
-                c1["refs_sinus"].append(int(sinus_refs[ii]) if ii < len(sinus_refs) else 0)
-                c1["sinus"].append([int(start_n), int(end_n)])
-                c1["voltage_sinus"].append(float(yy1.max() - yy1.min()))
+                c1["refs_sinus"].append(int(sr_out["ref_idx"]))
+                c1["sinus"].append([int(sr_out["start_n"]), int(sr_out["end_n"])])
+                c1["voltage_sinus"].append(float(sr_out["voltage"]))
                 c1["deflection_sinus"].append(False)
+            pre_n = int(SR_PRE_MS * 1000 / 1000)
+            post_n = int(SR_POST_MS * 1000 / 1000)
+            windows_info["sinus_start"] = [max(0, int(sr_out["ref_idx"]) - pre_n)]
+            windows_info["sinus_ref"] = [int(sr_out["ref_idx"])]
+            windows_info["sinus_duration"] = [pre_n + post_n]
 
         return {
             "windows_info": windows_info,
@@ -1067,6 +1061,144 @@ class PlotPresenter(BasePlotPresenter):
             canvas.create_line(0, 10 + 20 * idx, 150, 10 + 20 * idx, fill="black")
         canvas.create_line(0, 10 + 20 * len(legend), 150, 10 + 20 * len(legend), fill="black")
 
+    def _sr_roi_bounds(self, ref_idx: int, n_samples: int, fs: float = 1000.0) -> tuple[int, int, int, int]:
+        pre_n = int(round(SR_PRE_MS * fs / 1000.0))
+        post_n = int(round(SR_POST_MS * fs / 1000.0))
+        roi_start = max(0, int(ref_idx) - pre_n)
+        roi_end = min(int(n_samples), int(ref_idx) + post_n)
+        return roi_start, roi_end, pre_n, post_n
+
+    def _pick_sr_q_index(
+        self,
+        reference_signal,
+        stim_block_lo: int,
+        stim_block_hi: int,
+        egm,
+    ) -> int | None:
+        """Pick the SR Q anchor (last pre-stim Q, else first post-stim Q)."""
+        sinus_refs = list(getattr(egm, "sinus_ref", []) or [])
+        if sinus_refs:
+            ref_idx = int(sinus_refs[0])
+            if stim_block_lo >= 0 and stim_block_lo <= ref_idx < stim_block_hi:
+                return None
+            return ref_idx
+
+        ref_bp = np.asarray(reference_signal, dtype=np.float64).ravel()
+        if ref_bp.size < 50:
+            return None
+        r_idx = pan_tompkins_r_indices(ref_bp, fs=1000.0)
+        q_local = q_indices_before_r(ref_bp, r_idx, fs=1000.0, back_ms=95.0)
+        if q_local.size == 0:
+            return None
+        q_abs = q_local.astype(np.int64)
+        if stim_block_lo >= 0:
+            in_stim = (q_abs >= stim_block_lo) & (q_abs < stim_block_hi)
+            q_abs = q_abs[~in_stim]
+        if q_abs.size == 0:
+            return None
+        if stim_block_lo >= 0:
+            pre = q_abs[q_abs < stim_block_lo]
+            if pre.size:
+                return int(pre.max())
+            post = q_abs[q_abs >= stim_block_hi]
+            if post.size:
+                return int(post.min())
+        return int(q_abs.min())
+
+    def _delineate_sr_at_q(
+        self,
+        x,
+        y2,
+        bp_signal,
+        ref_idx: int,
+        cached_memory,
+        forcefull,
+        TH,
+        ep,
+    ):
+        """Delineate SR inside [Q−300 ms, Q+100 ms] using stim-matching params."""
+        ref_idx = int(ref_idx)
+        roi_start, roi_end, pre_n, post_n = self._sr_roi_bounds(ref_idx, len(x))
+        inner_lo = roi_start + STIM_SLICE_HEAD
+        inner_hi = roi_end - STIM_SLICE_TAIL
+        if inner_hi - inner_lo < 20:
+            return None
+
+        dont_save = False
+        x_energy = y_low = y_high = None
+
+        if (
+            not forcefull
+            and isinstance(cached_memory, list)
+            and len(cached_memory) == 2
+        ):
+            start_n, end_n = int(cached_memory[0]), int(cached_memory[1])
+        else:
+            xx = x[inner_lo:inner_hi]
+            yy = y2[inner_lo:inner_hi]
+            if xx.size == 0:
+                return None
+            x_energy, y_low, y_high, _y_total = self._energy_compute(xx, yy, ep)
+            output = find_start(
+                x_energy,
+                y_low,
+                length=2,
+                ax=None,
+                operation=None,
+                Th=0.15,
+                alpha=TH,
+                pick="earliest",
+            )
+            if output is not None:
+                start_n = int(inner_lo + output[0])
+                end_n = int(inner_lo + output[1])
+            else:
+                start_n, end_n = roi_start, min(roi_end, ref_idx)
+                dont_save = True
+
+        end_n = min(int(end_n), ref_idx)
+        start_n = int(start_n)
+        if end_n <= start_n:
+            return None
+
+        if x_energy is None:
+            xx = x[inner_lo:inner_hi]
+            yy = y2[inner_lo:inner_hi]
+            x_energy, y_low, y_high, _y_total = self._energy_compute(xx, yy, ep)
+
+        yy1 = y2[start_n:end_n]
+        xx_w = x[start_n:end_n]
+        yy_w = y2[start_n:end_n]
+        ok = bool(yy1.size and yy1.max() - yy1.min() > 0.05 and not dont_save)
+        defl = None
+        pi_pos = pi_neg = None
+        sig_pos = sig_neg = None
+        if ok:
+            pi_pos, sig_pos = compute_deflection_peaks(bp_signal, start_n, end_n)
+            pi_neg, sig_neg = compute_deflection_peaks(-bp_signal, start_n, end_n)
+            defl = int(len(pi_pos) + len(pi_neg))
+
+        return {
+            "start_n": start_n,
+            "end_n": end_n,
+            "ref_idx": ref_idx,
+            "coarse_start": roi_start,
+            "coarse_end": roi_end,
+            "dont_save": bool(dont_save),
+            "ok": ok,
+            "defl": defl,
+            "pi_pos": pi_pos,
+            "sig_pos": sig_pos,
+            "pi_neg": pi_neg,
+            "sig_neg": sig_neg,
+            "xx_w": xx_w,
+            "yy_w": yy_w,
+            "x_energy": x_energy,
+            "y_low": y_low,
+            "y_high": y_high,
+            "voltage": float(yy1.max() - yy1.min()) if yy1.size else 0.0,
+        }
+
     def _energy_compute(self, x, y, params: dict | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Pure energy compute (librosa spectrogram + convolutions).
 
@@ -1083,9 +1215,7 @@ class PlotPresenter(BasePlotPresenter):
                 "low_b0": int(self.app.low_b0[0]),
                 "low_b1": int(self.app.low_b1[0]),
             }
-        # ``self.app.librosa`` was kept on the App instance to avoid a second
-        # import at module top; reusing it here keeps that pattern.
-        _, _, mags = self.app.librosa.reassigned_spectrogram(
+        _, _, mags = librosa.reassigned_spectrogram(
             y,
             n_fft=int(params["n_fft"]),
             hop_length=int(params["hop_length"]),

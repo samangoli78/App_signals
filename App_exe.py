@@ -10,6 +10,6 @@ carto.Signals()
 
 
 from App.main_app import App
-app = App(name="Test", carto=carto)  
-app.start()
+app = App(carto=carto)
+app.start(name="Test")
 app.mainloop() 

@@ -70,6 +70,89 @@ class EditableTree(ttk.Treeview):
             self.selection_remove(self.selection())
             self.focus("")
 
+    def update_column_values(self, name, values) -> None:
+        """Update one column in place without rebuilding rows or selection."""
+        name = str(name)
+        cols = list(self["columns"])
+        if name not in cols:
+            return
+        ci = cols.index(name)
+        for ri, iid in enumerate(self.get_children()):
+            if ri >= len(values):
+                break
+            vals = self._get_values(iid)
+            while len(vals) <= ci:
+                vals.append("")
+            vals[ci] = values[ri]
+            self.item(iid, values=vals)
+        if hasattr(self, "df") and self.df is not None and name in self.df.columns:
+            n = min(len(values), len(self.df))
+            self.df.loc[: n - 1, name] = list(values)[:n]
+
+    def insert_column(self, name, values, *, after=None, width=120) -> None:
+        """Insert a column without rebuilding the tree."""
+        name = str(name)
+        cols = list(self["columns"])
+        if name in cols:
+            self.update_column_values(name, values)
+            return
+
+        if after is not None and str(after) in cols:
+            idx = cols.index(str(after)) + 1
+        else:
+            idx = len(cols)
+
+        new_cols = cols[:idx] + [name] + cols[idx:]
+        new_defaults: dict[int, list[str]] = {}
+        for col_idx, options in self.defaults.items():
+            new_key = col_idx + 1 if col_idx >= idx else col_idx
+            new_defaults[new_key] = options
+        self.defaults = new_defaults
+
+        self["columns"] = new_cols
+        self.heading(name, text=name)
+        self.column(name, width=width, minwidth=50, stretch=True, anchor="center")
+
+        for ri, iid in enumerate(self.get_children()):
+            vals = self._get_values(iid)
+            val = values[ri] if ri < len(values) else ""
+            vals.insert(idx, val)
+            self.item(iid, values=vals)
+
+        if self.cur_col >= idx:
+            self.cur_col += 1
+
+    def remove_column(self, name) -> None:
+        """Remove a column without rebuilding the tree."""
+        name = str(name)
+        cols = list(self["columns"])
+        if name not in cols:
+            return
+        idx = cols.index(name)
+
+        new_defaults: dict[int, list[str]] = {}
+        for col_idx, options in self.defaults.items():
+            if col_idx == idx:
+                continue
+            new_key = col_idx - 1 if col_idx > idx else col_idx
+            new_defaults[new_key] = options
+        self.defaults = new_defaults
+
+        self["columns"] = [c for c in cols if c != name]
+        for iid in self.get_children():
+            vals = self._get_values(iid)
+            if idx < len(vals):
+                del vals[idx]
+            self.item(iid, values=vals)
+
+        if self.cur_col == idx:
+            self.cur_col = max(0, idx - 1)
+        elif self.cur_col > idx:
+            self.cur_col -= 1
+
+        if hasattr(self, "df") and self.df is not None and name in self.df.columns:
+            self.df = self.df.drop(columns=[name])
+
     def _ensure_current_cell(self):
         kids = self.get_children()
         if not kids:
