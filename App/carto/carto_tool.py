@@ -1,3 +1,4 @@
+#%%
 import os
 import numpy as np
 import pandas as pd
@@ -7,10 +8,16 @@ import time
 import xml.etree.ElementTree as ET
 from lxml import etree
 from pathlib import Path
+import sys
 
-from ..base_components import BaseCartoLoader
-from .parser_tool import Parser_carto
-from .models import MapSection
+from sympy import flatten
+
+if __name__ == "__main__":
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from parser_tool import MapSection, Parser_carto
+else:
+    from .parser_tool import MapSection, Parser_carto
 
 
 def log(input: str, *args) -> str:
@@ -35,7 +42,7 @@ def log(input: str, *args) -> str:
     return out
 
 
-class Carto(BaseCartoLoader, Parser_carto):
+class Carto(Parser_carto):
     cartos = []
 
     def __init__(self, path=None, i=None) -> None:
@@ -62,35 +69,88 @@ class Carto(BaseCartoLoader, Parser_carto):
         map_data = []
         for xml in main_xmls:
             try:
-                tree = ET.parse(os.path.join(self.path, xml))
+                self.xml_path=os.path.join(self.path, xml)
+                tree = ET.parse(self.xml_path)
                 self.tree = tree.getroot()
                 map_data = [{key: attr for key, attr in map_.items()} for map_ in self.tree.find("Maps").findall("Map")]
                 if len(map_data) != 0:
                     break
             except Exception:
                 pass
+        try:
+            self.registration_matrix=np.array(self.tree.find("Meshes").find("RegistrationMatrix").text.split(),dtype=np.float32).reshape(4,4)
+        except Exception:
+            print(Exception)
+            self.registration_matrix=np.eye(4)
         if len(map_data) == 0:
+            print("couldnt encrypt the data the map_data length was 0")
             print(log("couldnt encrypt the data the map_data length was 0"))
             return False
         self.maps = [i["Name"] for i in map_data]
         if self.i is None:
             self.root = tk.Tk()
+            self.root.title("Select map")
+
+            container = tk.Frame(self.root)
+            container.pack(fill=tk.BOTH, expand=True)
+
+            canvas = tk.Canvas(container, highlightthickness=0)
+            scrollbar = tk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+            scrollable = tk.Frame(canvas)
+
+            def _update_scroll_region(_event=None):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            scrollable.bind("<Configure>", _update_scroll_region)
+            canvas_window = canvas.create_window((0, 0), window=scrollable, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            def _on_canvas_configure(event):
+                canvas.itemconfigure(canvas_window, width=event.width)
+
+            canvas.bind("<Configure>", _on_canvas_configure)
+
+            def _on_mousewheel(event):
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+            self._mousewheel_handler = _on_mousewheel
+            self.root.bind_all("<MouseWheel>", _on_mousewheel)
+
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
             self.frames = []
             self.labels = []
             for i in range(len(self.maps)):
-                self.frames.append(tk.Frame(self.root))
+                self.frames.append(tk.Frame(scrollable))
                 self.frames[i].pack(fill=tk.X)
                 self.labels.append(tk.StringVar())
                 self.labels[i] = self.maps[i]
-                button = tk.Button(self.frames[i], text=self.labels[i], command=lambda a=i: self.index(a), font=("timesnewroman", 10))
+                button = tk.Button(
+                    self.frames[i],
+                    text=self.labels[i],
+                    command=lambda a=i: self.index(a),
+                    font=("timesnewroman", 10),
+                )
                 button.pack(expand=True, fill=tk.X)
+
+            self.root.update_idletasks()
+            max_height = 480
+            content_height = scrollable.winfo_reqheight()
+            width = max(scrollable.winfo_reqwidth() + scrollbar.winfo_reqwidth() + 25, 280)
+            height = min(content_height + 10, max_height)
+            self.root.geometry(f"{width}x{height}")
+
             self.root.attributes("-topmost", True)
             self.root.after(150, lambda: self.root.attributes("-topmost", False))
             self.root.protocol("WM_DELETE_WINDOW", self.quit)
-            self.root.geometry(f"{int(self.root.winfo_width()) + 25}x{int(self.root.winfo_height()) + 150}")
             self.root.mainloop()
 
     def quit(self):
+        try:
+            self.root.unbind_all("<MouseWheel>")
+        except Exception:
+            pass
         self.root.quit()
         self.root.destroy()
 
@@ -99,9 +159,11 @@ class Carto(BaseCartoLoader, Parser_carto):
         self.quit()
 
     def Car_file(self):
-        with open(os.path.join(self.path, self.maps[self.i] + "_car.txt")) as file:
+        self.car_path=os.path.join(self.path, self.maps[self.i] + "_car.txt")
+        with open(self.car_path) as file:
+            self.version=file.readline().split()[0].split("_")[1]
             content = [m.split() for m in file.readlines()]
-            content = np.array(content[1:])
+            content = np.array(content)
             data = pd.DataFrame(
                 data=content,
                 columns=[chr(ord("A") + h) if h + ord("A") <= ord("Z") else "A" + chr(h - 1 + 2 * ord("A") - ord("Z")) for h in range(content.shape[1])],
@@ -147,6 +209,8 @@ class Carto(BaseCartoLoader, Parser_carto):
             return pd.concat([car[["label_color", "point number"]], c2, c3, car[["x", "y", "z"]], c4], axis=1)
         return None
 
+    
+
     def Signals(self, triple=False):
         data = self.electrodes(triple)
         content = []
@@ -166,12 +230,22 @@ class Carto(BaseCartoLoader, Parser_carto):
             with open(os.path.join(self.path, fname), "r", encoding="utf-8") as f:
                 _ = f.readline()
                 gain_line = f.readline().strip()
-                header_line = f.readline().strip()
+                if self.version == "6":
+                    header_line = f.readline().strip()
+                else:
+                    port_data = f.readline().split()
+                    vals = [port_data[2].split("=")[-1], port_data[5].split("=")[-1], port_data[7].split("=")[-1]]
+                    mask = data["file_number"] == fname
+                    data.loc[mask, "unipolar"] = vals[0]
+                    data.loc[mask, "bipolar"] = vals[1]
+                    data.loc[mask, "refference_chanel"] = vals[2]
+                    header_line = f.readline().strip()
             gain = float(gain_line.split("=")[-1])
             cols = [m.split("(")[0] for m in header_line.split()]
+            skiprows = 3 if self.version == "6" else 4
             df = pd.read_csv(
                 os.path.join(self.path, fname),
-                skiprows=3,
+                skiprows=skiprows,
                 sep=r"\s+",
                 names=cols,
                 dtype=np.float32,
@@ -205,3 +279,24 @@ class Carto(BaseCartoLoader, Parser_carto):
             sig_path = sub / f"{file_number}_sig.csv"
             meta_df.to_csv(meta_path, sep="\t", index=False, float_format="%.3f")
             signals_df.to_csv(sig_path, sep="\t", index=False, float_format="%.3f")
+#%%
+
+if __name__ == "__main__":
+    #%%    
+    carto=Carto('C:/Users/saman/Downloads/Export_FA-3-EXT-BIATRI-06_17_2026-10-44-34')
+
+
+    # %%
+    carto_old=Carto('C:/Users/saman/Downloads/SCUB_P007/P_007/ExportData11_06_25 14_39_24/Patient 2025_05_13/PERSUADE/Export_PERSUADE-06_11_2025-14-35-41')
+    carto_old.Car_file()
+
+    # %%
+    carto.Signals()
+    # %%
+    carto_old.Signals()
+    # %%
+    carto_old.registration_matrix
+
+    # %%
+    carto.registration_matrix
+    # %%

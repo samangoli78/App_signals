@@ -1,16 +1,49 @@
 from __future__ import annotations
-import os
-import numpy as np
-import vtk
 
-from typing import TYPE_CHECKING
-from ..base_components import BaseCartoParser
+import os
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import pandas as pd
+import vtk
+import sys
 
 if TYPE_CHECKING:
     from .carto_tool import Carto
 
 
-class Parser_carto(BaseCartoParser):
+@dataclass
+class MapSection:
+    """Container for one map point metadata and associated signal dataframe."""
+
+    points_df: pd.DataFrame
+    file_name: str
+    signals_df: pd.DataFrame
+
+    def __getitem__(self, index: int) -> Any:
+        if index == 0:
+            return self.points_df
+        if index == 1:
+            return self.file_name
+        if index == 2:
+            return self.signals_df
+        raise IndexError(index)
+
+    def __iter__(self):
+        yield self.points_df
+        yield self.file_name
+        yield self.signals_df
+
+
+@dataclass
+class DeltaEntry:
+    point_number: Any
+    label_color: str
+    metrics: dict[str, Any]
+
+
+class Parser_carto:
     def __init__(self, carto: "Carto"):
         self.carto = carto
         self.bipolar = None
@@ -164,3 +197,4 @@ class Parser_carto(BaseCartoParser):
         w.SetDataModeToAppended()
         w.EncodeAppendedDataOff()
         w.Write()
+

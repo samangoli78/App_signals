@@ -7,8 +7,8 @@ ParaView and older VTK readers open them reliably — no ``vtk`` Python package
 is required for export.
 
 Each export follows the Carto legacy layout: ``POINT_DATA`` with packed
-``double`` scalars in ``[0, 1]``, ``LOOKUP_TABLE lookup_table`` (1000 rows,
-four color bands), then ``NORMALS Normals float``.
+``double`` scalars in ``[0, 1]``, ``LOOKUP_TABLE lookup_table`` (default
+4 colour bands), then ``NORMALS Normals float``.
 """
 
 from __future__ import annotations
@@ -21,12 +21,33 @@ from pathlib import Path
 import numpy as np
 
 from . import colormap as cm
+from . import geometry as geom
 from . import laplacian as lap
 
 VTK_LEGACY_DATAFILE_VERSION = "4.1"
 VTK_LUT_NAME = "lookup_table"
-VTK_LUT_SIZE = 1000
+VTK_LUT_DEFAULT_BANDS = 4
 VTK_SCALAR_NAME = "scalars"
+
+
+def apply_registration_matrix(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    """Apply Carto 4x4 registration matrix to ``(N, 3)`` points (row-vector convention)."""
+    M = np.asarray(matrix, dtype=np.float64).reshape(4, 4)
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if pts.size == 0:
+        return pts.copy()
+    hom = np.concatenate([pts, np.ones((pts.shape[0], 1), dtype=np.float64)], axis=1)
+    return (hom @ M)[:, :3]
+
+
+def _registration_matrix_for(carto: object) -> np.ndarray | None:
+    reg = getattr(carto, "registration_matrix", None)
+    if reg is None:
+        return None
+    M = np.asarray(reg, dtype=np.float64).reshape(4, 4)
+    if np.allclose(M, np.eye(4)):
+        return None
+    return M
 
 
 def _safe_array_name(tag: str) -> str:
@@ -172,25 +193,56 @@ _CARTO_LUT_COLORS: tuple[tuple[float, float, float, float], ...] = (
     (1.0, 0.0, 0.0, 1.0),   # red
 )
 
+# Electrode label LUT (low → high): reject grey, NEG orange, POS green.
+_POINTS_LUT_COLORS: tuple[tuple[float, float, float, float], ...] = (
+    (0.55, 0.55, 0.55, 1.0),   # reject / unknown
+    (1.0, 0.55, 0.0, 1.0),     # NEG
+    (0.15, 0.75, 0.20, 1.0),   # POS
+)
 
-def carto_lookup_table_rgba(*, lut_size: int = VTK_LUT_SIZE) -> np.ndarray:
-    """Carto legacy LUT: ``lut_size`` rows, four equal color bands (low → high)."""
-    n = int(lut_size)
-    n_colors = len(_CARTO_LUT_COLORS)
+
+def _band_lookup_table_rgba(
+    colors: tuple[tuple[float, float, float, float], ...],
+    *,
+    lut_bands: int = VTK_LUT_DEFAULT_BANDS,
+) -> np.ndarray:
+    """Build a legacy VTK LUT with ``lut_bands`` rows split across *colors*."""
+    n = max(1, int(lut_bands))
+    n_colors = len(colors)
     band = max(1, n // n_colors)
     rows: list[np.ndarray] = []
-    for i, rgba in enumerate(_CARTO_LUT_COLORS):
+    for i, rgba in enumerate(colors):
         count = band if i < n_colors - 1 else max(0, n - band * (n_colors - 1))
         if count <= 0:
             continue
         rows.append(np.tile(np.asarray(rgba, dtype=np.float64), (count, 1)))
     out = np.vstack(rows) if rows else np.zeros((0, 4), dtype=np.float64)
     if out.shape[0] < n:
-        pad = np.tile(np.asarray(_CARTO_LUT_COLORS[-1], dtype=np.float64), (n - out.shape[0], 1))
+        pad = np.tile(np.asarray(colors[-1], dtype=np.float64), (n - out.shape[0], 1))
         out = np.vstack([out, pad])
     elif out.shape[0] > n:
         out = out[:n]
     return out
+
+
+def carto_lookup_table_rgba(*, lut_bands: int = VTK_LUT_DEFAULT_BANDS) -> np.ndarray:
+    """Carto legacy LUT: ``lut_bands`` rows across four colour bands (default 4 = one per band)."""
+    return _band_lookup_table_rgba(_CARTO_LUT_COLORS, lut_bands=lut_bands)
+
+
+def points_label_lookup_table_rgba() -> np.ndarray:
+    """Electrode label LUT: 3 rows — reject grey, NEG orange, POS green."""
+    return _band_lookup_table_rgba(_POINTS_LUT_COLORS, lut_bands=len(_POINTS_LUT_COLORS))
+
+
+def label_color_to_scalar(label: str) -> float:
+    """Map electrode label to fixed scalar in ``[0, 1]`` for the points LUT."""
+    lab = str(label or "").strip().lower()
+    if lab == "pos":
+        return 1.0
+    if lab == "neg":
+        return 0.5
+    return 0.0
 
 
 def build_vtk_lookup_table_rgba(
@@ -201,7 +253,7 @@ def build_vtk_lookup_table_rgba(
     color_mode: str = "standard",
     piece_knots: list[float] | None = None,
     custom_bins: list[dict] | None = None,
-    lut_size: int = VTK_LUT_SIZE,
+    lut_size: int = 256,
 ) -> np.ndarray:
     """Return ``(lut_size, 4)`` float64 RGBA table in ``[0, 1]`` for legacy VTK."""
     rgb_u8, _ = cm.build_1d_lut_rgb(
@@ -302,6 +354,7 @@ def write_vtk_polydata(
     lookup_table_rgba: np.ndarray | None = None,
     include_normals: bool = True,
     swap_winding: bool = True,
+    normalize_scalars: bool = True,
 ) -> None:
     """Legacy ASCII ``.vtk`` polydata matching Carto export layout."""
     path = Path(path)
@@ -320,14 +373,17 @@ def write_vtk_polydata(
     if np.asarray(arr, dtype=np.float64).reshape(-1).size != n:
         raise ValueError(f"array {_name!r} length != nverts {n}")
 
-    scalars_01 = _normalize_scalars_01(arr)
+    scalars_01 = _normalize_scalars_01(arr) if normalize_scalars else np.clip(
+        np.asarray(arr, dtype=np.float64).reshape(-1), 0.0, 1.0
+    )
 
     lut = lookup_table_rgba
     if lut is None:
         lut = carto_lookup_table_rgba()
     lut = np.asarray(lut, dtype=np.float64).reshape(-1, 4)
-    if lut.shape[0] != VTK_LUT_SIZE:
-        raise ValueError(f"lookup table must have {VTK_LUT_SIZE} entries, got {lut.shape[0]}")
+    lut_n = int(lut.shape[0])
+    if lut_n < 1:
+        raise ValueError("lookup table must have at least one entry")
 
     pname = str(patient_name or "").strip()
     desc = f"PatientData {pname}" if pname else "PatientData"
@@ -353,7 +409,7 @@ def write_vtk_polydata(
         fp.write(f"LOOKUP_TABLE {VTK_LUT_NAME}{eol}")
         for line in _packed_double_lines(scalars_01, per_line=9):
             fp.write(line + eol)
-        fp.write(f"LOOKUP_TABLE {VTK_LUT_NAME} {VTK_LUT_SIZE}{eol}")
+        fp.write(f"LOOKUP_TABLE {VTK_LUT_NAME} {lut_n}{eol}")
         for row in lut:
             fp.write(
                 f"{float(row[0]):g} {float(row[1]):g} {float(row[2]):g} {float(row[3]):g}{eol}"
@@ -380,6 +436,7 @@ def export_all_delta_metrics(
     lookup_table_rgba: np.ndarray | None = None,
     include_normals: bool = True,
     swap_winding: bool = True,
+    lut_bands: int = VTK_LUT_DEFAULT_BANDS,
 ) -> int:
     """Write one ``.vtk`` per delta metric key. Returns number of files written."""
     out_dir = Path(out_dir)
@@ -390,6 +447,10 @@ def export_all_delta_metrics(
     if verts.size == 0 or tris.size == 0:
         raise RuntimeError("Mesh vertices/triangles are not loaded on carto object.")
 
+    reg = _registration_matrix_for(carto)
+    if reg is not None:
+        verts = apply_registration_matrix(verts, reg)
+
     keys = list(provider.get_delta_metric_keys() or [])
     if not keys:
         return 0
@@ -398,9 +459,12 @@ def export_all_delta_metrics(
     if rad is None or not (math.isfinite(float(rad)) and float(rad) > 0):
         rad = float(default_radius_fn()) if callable(default_radius_fn) else None
 
+    lut_n = max(1, int(lut_bands))
     lut = lookup_table_rgba
     if lut is None:
-        lut = carto_lookup_table_rgba()
+        lut = carto_lookup_table_rgba(lut_bands=lut_n)
+    elif np.asarray(lut).shape[0] != lut_n:
+        lut = carto_lookup_table_rgba(lut_bands=lut_n)
 
     n_written = 0
     for key in keys:
@@ -432,3 +496,63 @@ def export_all_delta_metrics(
         except Exception:
             traceback.print_exc()
     return n_written
+
+
+def export_electrode_points_vtk(
+    out_path: str | Path,
+    *,
+    carto: object,
+    elec_raw: np.ndarray,
+    elec_global_idx: list[int],
+    label_color_for: object,
+    sphere_radius_raw: float,
+    patient_name: str | None = None,
+    include_normals: bool = True,
+    swap_winding: bool = True,
+) -> bool:
+    """Write electrode spheres as legacy Carto ``points.vtk``. Returns True on success."""
+    out_path = Path(out_path)
+    pts = np.asarray(elec_raw, dtype=np.float64).reshape(-1, 3)
+    gidx = [int(x) for x in (elec_global_idx or [])]
+    if pts.size == 0 or not gidx:
+        return False
+    if pts.shape[0] != len(gidx):
+        raise ValueError("elec_raw / elec_global_idx length mismatch")
+
+    reg = _registration_matrix_for(carto)
+    if reg is not None:
+        pts = apply_registration_matrix(pts, reg)
+
+    radius = float(sphere_radius_raw)
+    if not np.isfinite(radius) or radius <= 0:
+        raise ValueError("sphere_radius_raw must be a positive finite value")
+
+    base_v, base_t = geom.icosphere(subdivisions=1)
+    verts, _normals, tris, sphere_idx = geom.build_sphere_batch(
+        pts.astype(np.float32),
+        radius,
+        base_v,
+        base_t,
+    )
+
+    center_scalars = np.zeros(len(gidx), dtype=np.float64)
+    for i, gi in enumerate(gidx):
+        try:
+            lab = label_color_for(int(gi))
+        except Exception:
+            lab = ""
+        center_scalars[i] = label_color_to_scalar(lab)
+    vertex_scalars = center_scalars[np.asarray(sphere_idx, dtype=np.int64)]
+
+    write_vtk_polydata(
+        out_path,
+        verts.astype(np.float64),
+        tris.astype(np.int64),
+        {"scalars": vertex_scalars},
+        patient_name=patient_name,
+        lookup_table_rgba=points_label_lookup_table_rgba(),
+        include_normals=include_normals,
+        swap_winding=swap_winding,
+        normalize_scalars=False,
+    )
+    return True

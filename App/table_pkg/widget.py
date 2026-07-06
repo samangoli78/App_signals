@@ -16,6 +16,7 @@ class EditableTree(ttk.Treeview):
         self.cur_iid: str | None = None
         self.cur_col: int = 0
         self._edit_entry: tk.Entry | None = None
+        self._hidden_columns: set[str] = set()
 
         self.tag_configure("active_row", background="#E8F0FE")
         self.tag_configure("changed", background="#A5A5A5")
@@ -59,6 +60,9 @@ class EditableTree(ttk.Treeview):
             iid = f"row{i}"
             self.insert("", "end", iid=iid, values=[row[c] for c in df.columns])
 
+        self._hidden_columns = set()
+        self._apply_display_columns()
+
         kids = self.get_children()
         if kids:
             self.cur_iid = kids[0]
@@ -88,6 +92,24 @@ class EditableTree(ttk.Treeview):
         if hasattr(self, "df") and self.df is not None and name in self.df.columns:
             n = min(len(values), len(self.df))
             self.df.loc[: n - 1, name] = list(values)[:n]
+
+    def _apply_display_columns(self) -> None:
+        cols = list(self["columns"])
+        if not cols:
+            return
+        visible = [c for c in cols if c not in self._hidden_columns]
+        self["displaycolumns"] = visible if visible else cols
+
+    def set_column_visible(self, name: str, visible: bool) -> None:
+        """Show or hide a column without changing column order or indices."""
+        name = str(name)
+        if name not in list(self["columns"]):
+            return
+        if visible:
+            self._hidden_columns.discard(name)
+        else:
+            self._hidden_columns.add(name)
+        self._apply_display_columns()
 
     def insert_column(self, name, values, *, after=None, width=120) -> None:
         """Insert a column without rebuilding the tree."""

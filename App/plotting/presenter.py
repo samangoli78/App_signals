@@ -12,19 +12,19 @@ import librosa
 from matplotlib.patches import Rectangle
 from scipy.signal import find_peaks
 
-from ..analyzers import DefaultAnalyzer, TripleExtraAnalyzer
-from ..base_components import BasePlotPresenter
-from ..mediators.work_queue import LatestWinsWorker
-from ..triple_extra import Triple_Extra
-from ..ui import Area
+from .analyzers import DefaultAnalyzer, TripleExtraAnalyzer
 from ..utility import (
+    LatestWinsWorker,
     butter_bandpass_filter,
     filter_indices_outside_windows,
     find_start,
+    pan_tompkins_r_indices,
+    q_indices_before_r,
     r_q_markers_for_display,
     stim_pulse_exclusion_spans_signed_m,
 )
-from ..utility.signals_ecg import pan_tompkins_r_indices, q_indices_before_r
+from ..utility.triple_extra import Triple_Extra
+from ..plotting import Area
 
 SR_PRE_MS = 300
 SR_POST_MS = 100
@@ -90,11 +90,9 @@ def deflection(y, ax, start, end, inverse=False):
     return len(peak_indices)
 
 
-class PlotPresenter(BasePlotPresenter):
+class PlotPresenter:
     def __init__(self, app):
-        # Strategy pattern:
-        # choose analyzer behavior at runtime (default vs triple-extra mode).
-        super().__init__(app)
+        self.app = app
         self.default_analyzer = DefaultAnalyzer()
         self.triple_analyzer = TripleExtraAnalyzer()
         # Background worker for the heavy triple-extra compute (filtfilt +
@@ -123,6 +121,47 @@ class PlotPresenter(BasePlotPresenter):
                 cb()
             except Exception:
                 traceback.print_exc()
+
+    def capture_axes_view(self) -> dict[str, tuple[tuple[float, float], tuple[float, float]]]:
+        """Remember current x/y limits for every signal axis."""
+        views: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {}
+        axes = getattr(self.app, "axes", None) or {}
+        for name, ax in axes.items():
+            views[name] = (tuple(ax.get_xlim()), tuple(ax.get_ylim()))
+        self.app._axes_view_preserve = views
+        return views
+
+    def restore_axes_view(self, views=None) -> None:
+        """Reapply saved limits and stretch shade overlays to match."""
+        views = views or getattr(self.app, "_axes_view_preserve", None)
+        axes = getattr(self.app, "axes", None) or {}
+        if not views or not axes:
+            return
+        for name, ax in axes.items():
+            saved = views.get(name)
+            if saved is None:
+                continue
+            xl, yl = saved
+            ax.set_xlim(xl)
+            ax.set_ylim(yl)
+            ax.set_autoscale_on(False)
+        self._sync_shade_areas_to_view(views)
+
+    def _sync_shade_areas_to_view(self, views=None) -> None:
+        views = views or getattr(self.app, "_axes_view_preserve", None)
+        areas = getattr(self.app, "Areas", None) or {}
+        if not views:
+            return
+        for axis_name, area_list in areas.items():
+            saved = views.get(axis_name)
+            if saved is None:
+                continue
+            ylim = saved[1]
+            for area in area_list:
+                area.ylim = ylim
+                area.configure_shade_attr(x=area.x, y=ylim)
+                for line in area.lines:
+                    line.set_ydata(ylim)
 
     def on_right_click(self, event):
         # Mouse interaction state machine:
@@ -178,6 +217,7 @@ class PlotPresenter(BasePlotPresenter):
                 area.configure_shade_attr(x=area.x, y=self.app.selected_ax.get_ylim())
                 for line in area.lines:
                     line.set_ydata(self.app.selected_ax.get_ylim())
+        self.capture_axes_view()
         self.app.canvas.draw_idle()
 
     def on_scroll(self, event):
@@ -200,6 +240,7 @@ class PlotPresenter(BasePlotPresenter):
                     area.configure_shade_attr(x=area.x, y=axis.get_ylim())
                     for line in area.lines:
                         line.set_ydata(axis.get_ylim())
+        self.capture_axes_view()
         self.app.canvas.draw_idle()
 
     @staticmethod
@@ -368,18 +409,18 @@ class PlotPresenter(BasePlotPresenter):
             "i": int(self.app.i),
             "j": int(self.app.j),
             "forcefull": bool(self.app.forcefull),
-            "TH": float(self.app.TH[0]),
+            "TH": float(self.app.plot_settings.TH[0]),
             "cached_delta": cached_delta,
             "point_number": self.app.cont[self.app.i][0]["point number"].values[self.app.j],
             "label_color": self.app.cont[self.app.i][0]["label_color"].values[self.app.j],
             # Energy params snapshot — used by worker's energy compute.
             "energy_params": {
-                "n_fft": int(self.app.win_length[0]) + 25,
-                "hop_length": int(self.app.hop_length[0]),
-                "win_length": int(self.app.win_length[0]),
-                "len_han": int(self.app.len_hann[0]),
-                "low_b0": int(self.app.low_b0[0]),
-                "low_b1": int(self.app.low_b1[0]),
+                "n_fft": int(self.app.plot_settings.win_length[0]) + 25,
+                "hop_length": int(self.app.plot_settings.hop_length[0]),
+                "win_length": int(self.app.plot_settings.win_length[0]),
+                "len_han": int(self.app.plot_settings.len_hann[0]),
+                "low_b0": int(self.app.plot_settings.low_b0[0]),
+                "low_b1": int(self.app.plot_settings.low_b1[0]),
             },
         }
 
@@ -703,6 +744,7 @@ class PlotPresenter(BasePlotPresenter):
             self.create_legend(
                 leg=ax.get_legend_handles_labels(), canvas=self.app.ccs[arg], addition=addition
             )
+            self.restore_axes_view()
             try:
                 self.app.canvas.draw_idle()
             except Exception:
@@ -850,6 +892,7 @@ class PlotPresenter(BasePlotPresenter):
             self.create_legend(leg=ax1.get_legend_handles_labels(), canvas=self.app.ccs["bot"])
         except Exception:
             traceback.print_exc()
+        self.restore_axes_view()
         try:
             self.app.canvas.draw_idle()
         except Exception:
@@ -1020,6 +1063,7 @@ class PlotPresenter(BasePlotPresenter):
             self.default_analyzer.render_signal_axis(self.app, self.app.axes, x, y2, m)
             self._fire_plot_done()
 
+        self.restore_axes_view()
         try:
             self.app.canvas.draw_idle()
         except Exception:
@@ -1208,12 +1252,12 @@ class PlotPresenter(BasePlotPresenter):
         """
         if params is None:
             params = {
-                "n_fft": int(self.app.win_length[0]) + 25,
-                "hop_length": int(self.app.hop_length[0]),
-                "win_length": int(self.app.win_length[0]),
-                "len_han": int(self.app.len_hann[0]),
-                "low_b0": int(self.app.low_b0[0]),
-                "low_b1": int(self.app.low_b1[0]),
+                "n_fft": int(self.app.plot_settings.win_length[0]) + 25,
+                "hop_length": int(self.app.plot_settings.hop_length[0]),
+                "win_length": int(self.app.plot_settings.win_length[0]),
+                "len_han": int(self.app.plot_settings.len_hann[0]),
+                "low_b0": int(self.app.plot_settings.low_b0[0]),
+                "low_b1": int(self.app.plot_settings.low_b1[0]),
             }
         _, _, mags = librosa.reassigned_spectrogram(
             y,

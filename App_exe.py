@@ -1,3 +1,5 @@
+#%%
+
 import sys
 print(sys.prefix)
 
@@ -13,3 +15,4 @@ from App.main_app import App
 app = App(carto=carto)
 app.start(name="Test")
 app.mainloop() 
+# %%

@@ -1,151 +1,38 @@
+"""Main app organizer: glue subpackages via mediators + app logic (ML, delta, navigation)."""
+
 # Import order pattern:
-# 1) standard/third-party libraries, 2) local project modules.
-# This makes dependencies predictable and easier to scan.
-# public libs
 import tkinter as tk
 from tkinter import ttk
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import matplotlib.pyplot as plt
 import numpy as np
 from PIL import ImageGrab
 import pandas as pd
 from tkinter import filedialog
 from tkinter import messagebox
 import threading
-import time
 import traceback
 
 
 # private libs
-from .table_pkg import TableWidget
 from .carto import Carto
-from .ui import Toplevel as tp
-from . import patch_global
-from .controller import AppController
-from .plotting import PlotPresenter
-from .session_store import SessionStore
-from .mediators.table_mediator import TableAppGlue
-from .mediators.mesh_mediator import MeshAppGlue
-from .viewer3d import CartoMeshPanel
-from .ui.left_ribbon import build_app_shell, build_left_ribbon
-from .ui.resize_pause import attach_resize_pause, install_canvas_draw_guard
-from .ml_inference import (
+from .core import AppController, DeltaStore, SessionStore, register_app
+from .mediators.wiring import DEFAULT_WIRING
+from .mediators.tools_ribbon import build_left_ribbon
+from .ml import (
     MLBundle,
-    extract_features_from_delta_entry,
     find_local_model_files,
     load_ml_bundle,
     predicted_label_for_delta,
+    should_reject_delta_entry,
 )
-
-# Auto-reject threshold: signals where the SR window (voltage_sinus[0]) OR
-# the first stim (voltage_stim[0]) has a peak-to-peak voltage below this
-# floor are labelled "Reject" before prediction. Later stims (S2, S3) are
-# not part of the gate — only the SR and S1 amplitudes matter for
-# rejecting noisy / non-capturing acquisitions. The reject filter in
-# MeshAppGlue.get_delta_values_for then excludes them from every
-# interpolation pass.
-ML_PEAK_TO_PEAK_MIN_MV = 0.1
-
-
-def _build_table_and_plot_layout(app, parent):
-    # ---- vertical split: table on top, plots + mesh below
-    panned_window = ttk.PanedWindow(parent, orient="vertical")
-    panned_window.pack(expand=True, fill=tk.BOTH)
-    # ---- table pane frame
-    frame3 = tk.Frame(parent)
-    panned_window.add(frame3, weight=1)
-    # ---- annotation table widget
-    table = TableWidget(frame3, app.Table)
-    table.pack(fill="both", expand=True)
-    # ---- table column defaults (Reject / POS / NEG)
-    tv = table.tree
-    tv.defaults = {1: ["Reject", "POS", "NEG"]}
-
-    # ---- horizontal split: matplotlib plots left, 3D mesh right
-    # Horizontal split for the lower pane: matplotlib plots on the left,
-    # OpenGL Carto mesh viewer on the right. Wrapping the existing plot
-    # frame in a ttk.PanedWindow lets the user resize the 3D pane without
-    # touching any of the original plotting code paths below.
-    plot_pane = ttk.PanedWindow(panned_window, orient="horizontal")
-    panned_window.add(plot_pane, weight=2)
-
-    # ---- matplotlib signals / plots frame
-    frame1 = tk.Frame(plot_pane, pady=5, background="white")
-    plot_pane.add(frame1, weight=3)
-
-    # ---- 3D Carto mesh viewer frame
-    # 3D mesh viewer pane. Built defensively: if the Carto object can't
-    # provide a mesh (no .mesh file, missing OpenGL drivers, etc.) the
-    # panel falls back to a label instead of crashing the whole app.
-    frame_mesh = tk.Frame(plot_pane, background="black")
-    plot_pane.add(frame_mesh, weight=2)
-    mesh_panel = None
-    try:
-        # ---- CartoMeshPanel (OpenGL mesh + toolbar)
-        mesh_panel = CartoMeshPanel(frame_mesh, app.carto)
-        mesh_panel.pack(fill="both", expand=True)
-        # ---- link table rows to mesh spheres (mesh_glue mediator)
-        # Hook the mediator: spheres at every table row, click <-> select.
-        try:
-            app.mesh_glue.attach(mesh_panel)
-        except Exception:
-            traceback.print_exc()
-    except Exception as _mesh_exc:
-        traceback.print_exc()
-        # ---- fallback label when 3D viewer fails to load
-        tk.Label(
-            frame_mesh,
-            text=f"3D viewer disabled: {_mesh_exc}",
-            bg="black",
-            fg="white",
-            wraplength=240,
-            justify="left",
-        ).pack(fill="both", expand=True, padx=8, pady=8)
-    return {
-        "table": table,
-        "frame1": frame1,
-        "frame_mesh": frame_mesh,
-        "mesh_panel": mesh_panel,
-        "vertical_pane": panned_window,
-        "plot_pane": plot_pane,
-    }
-
-
-def _init_patch_ui_state():
-    # ---- cached per-section patch dv/ds results
-    # Per-patch dv/ds state. Populated by "Compute patch dv/ds":
-    #   patch_global_results = {section_i: {window_type: {dvds_patch, ...}}}
-    # A "patch" is one acquisition take/section. When results exist,
-    # set_figure adds a 4th "dvds" subplot under the bipolar axis; a
-    # window-type selector + time slider drive the cached |dV/ds| field
-    # on the 3D mesh, and the take owning the currently-navigated point
-    # is the active patch (mesh + subplot follow navigation).
-    return {
-        "patch_global_results": {},
-        # ---- active interest window type (stim / SR / …)
-        "patch_active_window": None,
-        # ---- time index within active patch window
-        "patch_time_index": 0,
-        # ---- patch time slider widget (created later in set_figure)
-        "_patch_slider": None,
-        # ---- patch window-type combobox widget
-        "_patch_window_combo": None,
-        # ---- patch window-type StringVar
-        "_patch_window_var": None,
-        # ---- whether patch preview is shown on 3D mesh
-        "_patch_preview_on": False,
-        # ---- vertical cursor line on dv/ds subplot
-        "_patch_cursor_line": None,
-        # ---- shared Laplacian / graph operators (lazy init)
-        # Lazy per-patch compute: shared mesh operators are built once and
-        # reused; each take/section is computed on first visit and cached in
-        # ``patch_global_results`` so re-visits are instant.
-        "_patch_ops": None,
-        # ---- patch dv/ds mode enabled flag
-        "_patch_mode_on": False,
-        # ---- sections currently computing in background
-        "_patch_sections_computing": set(),
-    }
+from .mediators.resize_pause import (
+    attach_resize_pause,
+    install_canvas_draw_guard,
+    register_resize_watch_widgets,
+)
+from .plotting.figure_host import SignalFigureHost
+from .plotting.spectrogram_settings import SpectrogramSettings
+from .plotting.stft_settings_dialog import StftSettingsDialog
+from .shell import build_shell_frame
 
 
 def _init_startup_state(app, name="Saman"):
@@ -165,39 +52,18 @@ def _init_startup_state(app, name="Saman"):
 
 
 class App(tk.Tk):
-    # Class attributes (shared state):
-    # these values live on the class, so all App instances see the same defaults unless overridden.
-    # Here lists are used so values can be mutated in-place from settings windows.
-    apps=[]
-    n_fft=[100]
-    hop_length=[5]
-    win_length=[35]
-    high_b0=[40]
-    high_b1=[200]
-    low_b0=[3]
-    low_b1=[150]
-    len_hann=[5]
-    max_pooling_length=[1]
-    TH=[0.45]
-    # Dependency slots can be overridden by child app variants without changing core logic.
-    controller_cls = AppController
-    presenter_cls = PlotPresenter
-    store_cls = SessionStore
-    table_glue_cls = TableAppGlue
-    mesh_glue_cls = MeshAppGlue
-    def __init__(self, carto: Carto = None):
-        # __init__ is the object constructor: runs once when App(...) is created.
-        # `carto: Carto` is a type hint for readability/editor assistance.
-        # `=None` means the parameter is optional at call time.
-        # Runtime UI state (name, cont alias, protocol flags, ML slots) is set in
-        # ``start()`` via ``_init_startup_state`` so ``__init__`` only wires data.
-        self.apps.append(self)
+    def __init__(self, carto: Carto = None, *, wiring=DEFAULT_WIRING):
+        register_app(self)
+        self.wiring = wiring
+        self.plot_settings = SpectrogramSettings()
         self.carto = carto
-        # Composition: this class owns helper objects and delegates specialized work to them.
-        # This keeps the main window class smaller and easier to maintain.
-        self.session_store = self.store_cls()
-        self.controller = self.controller_cls(self)
-        self.plot_presenter = self.presenter_cls(self)
+        self.session_store = SessionStore()
+        self.delta_store = DeltaStore(carto, session_store=self.session_store)
+        self.delta_store.build_index_map(hide_labels=True)
+        self.delta_store.allocate_entries()
+        self.Table = self.delta_store.build_table_dataframe()
+        self.controller = AppController(self)
+        self.plot_presenter = wiring.presenter_cls(self)
         # Mesh re-interp must run AFTER the plot has actually finished writing
         # to ``self.delta`` (otherwise it would interpolate against stale
         # values). The async triple-extra path makes this listener mandatory.
@@ -205,58 +71,29 @@ class App(tk.Tk):
             self.plot_presenter.add_plot_done_listener(self._on_plot_done)
         except Exception:
             traceback.print_exc()
-        self.table_glue = self.table_glue_cls(self)
-        self.mesh_glue = self.mesh_glue_cls(self)
+        self.table_glue = wiring.table_glue_cls(self)
+        self.mesh_glue = wiring.mesh_glue_cls(self)
         self.i, self.j = 0, 0
-        self.Table=[]
-        self.i_j_to_index(labels="hide")
-        self.creating_delta()
-        # going to the first item of the list, which is arbitrary and could be any other numbers, 
-        # and accesss the first element that is a dataframe containing information of the points
-        all_columns=self.carto.cont[0][0].columns
-        self.Table=pd.DataFrame(self.Table,columns=all_columns)
-        self.Table=pd.concat([self.Table,pd.DataFrame(np.zeros(len(self.to_i_j)),columns=["Coment"])],axis=1)
-        # Prediction column sits BEFORE ``delta`` so the presenter's existing
-        # ``vals[-1] = delta_summary`` write keeps pointing at the right cell.
-        self.Table=pd.concat([self.Table,pd.DataFrame(np.full(len(self.to_i_j), "", dtype=object),columns=["Prediction"])],axis=1)
-        self.Table=pd.concat([self.Table,pd.DataFrame(np.zeros(len(self.to_i_j)),columns=["delta"])],axis=1)
 
-    def creating_delta(self):
-        #delta is a list of dictionaries that contains the information about the stimulations and sinus signals.
-        #preallocation of the delta list
-        self.delta=[0]*len(self.to_i_j)
-        
-    def i_j_to_index(self,labels="unhide"):
-        self.to_index=[]
-        self.to_i_j=[]
-        self.labels_memory=[]
-        carto=self.carto
-        ind=0
-        # structure of the cont: [section1,section2,section3,...]
-        # structure of the section: [dataframe, name of the file, signals]
-        # enumerate(iterable) yields both index and value in one loop:
-        # i = numeric position, section = current element.
-        for i,section in enumerate(carto.cont):
-            self.to_index.append([])
-            self.labels_memory.append([])
-            section: tuple[pd.DataFrame, str, pd.DataFrame]
-            # Nested enumerate creates a 2D traversal (section index i, row index j).
-            for j,dat in enumerate(section[0].values):
-                self.labels_memory[i].append(carto.cont[i][0].loc[j,"label_color"])
-                #hiding the labels
-                if labels=="hide":
-                    carto.cont[i][0].loc[j,"label_color"]=""
-                # Index mapping concept:
-                # 2D coordinates (section i, point j) map to one flat row index for table syncing.
-                self.to_index[i].append(ind)
-                # Reverse mapping lets us jump from a table row back to the original data point.
-                self.to_i_j.append([i,j])
-                # updating the table matrix
-                self.Table.append(dat)
-                # increaing the index after each nested itteration
-                ind+=1
-                
+    @property
+    def delta(self):
+        return self.delta_store.delta
 
+    @delta.setter
+    def delta(self, value):
+        self.delta_store.delta = value
+
+    @property
+    def to_index(self):
+        return self.delta_store.to_index
+
+    @property
+    def to_i_j(self):
+        return self.delta_store.to_i_j
+
+    @property
+    def labels_memory(self):
+        return self.delta_store.labels_memory
 
     def start(self, name="Saman"):
 
@@ -282,60 +119,44 @@ class App(tk.Tk):
         self.geometry("900x700")
         self.title(f"My {self.name} APP")
 
-        # ---- collapsible resizable left ribbon + main content split
-        shell = build_app_shell(self)
-        ribbon = build_left_ribbon(self, shell["ribbon_column"])
+        # ---- main window frame (ribbon + dock) then mount panels via glue
+        frame = build_shell_frame(self)
+        self.layout_glue = self.wiring.layout_glue_cls(self)
+        self.layout_glue.mount(frame)
+
+        ribbon = build_left_ribbon(self, frame["ribbon_column"], frame["dock_grid"])
         self.label = ribbon["label"]
         self.check_boxes = ribbon["check_boxes"]
         self.button_trip = ribbon["button_trip"]
         self.button_VT = ribbon["button_VT"]
         self.button_dropdown = ribbon["button_dropdown"]
         self.button_compute_all = ribbon["button_compute_all"]
-        self.button_global_patch = ribbon["button_global_patch"]
         self.button_compute_cv = ribbon["button_compute_cv"]
         self.ml_model_var = ribbon["ml_model_var"]
         self.ml_combo = ribbon["ml_combo"]
         self.pred_label = ribbon["pred_label"]
         self.show_original_labels_var = ribbon["show_original_labels_var"]
-
-        layout = _build_table_and_plot_layout(self, shell["content_host"])
-        self.table = layout["table"]
-        self.frame1 = layout["frame1"]
-        self.mesh_panel = layout["mesh_panel"]
+        self.panel_vis_vars = ribbon.get("panel_vis_vars", {})
         # ---- scan model/ folder for joblib bundles (after table exists)
         # Auto-discover joblib bundles in the sibling ``model/`` folder so the
         # dropdown can offer them without forcing the user to file-dialog
         # every time. Selection stays at "(none)" until the user picks one.
         self._refresh_ml_discovery()
 
-        for key, value in _init_patch_ui_state().items():
-            setattr(self, key, value)
-
         # ---- create matplotlib figure and axes
         # self.axes is a dictionary that contains the axes objects for the top, mid, and bottom axes.
         self.set_figure()
         install_canvas_draw_guard(self)
+        # Only pause redraws for outer window / ribbon sash drags — not dock panel moves.
         resize_watch = [
             self,
-            self.frame1,
-            layout["frame_mesh"],
-            shell["ribbon_shell"],
-            shell["content_host"],
+            frame["ribbon_shell"],
+            frame["content_host"],
         ]
-        viewer = getattr(self.mesh_panel, "viewer", None) if self.mesh_panel else None
-        if viewer is not None:
-            resize_watch.append(viewer)
-        resize_panes = [
-            shell["outer_pane"],
-            layout["vertical_pane"],
-            layout["plot_pane"],
-        ]
-        mesh_ribbon = getattr(self.mesh_panel, "ribbon_pane", None) if self.mesh_panel else None
-        if mesh_ribbon is not None:
-            resize_panes.append(mesh_ribbon)
+        self._shell_outer_pane = frame["outer_pane"]
         attach_resize_pause(
             self,
-            panes=resize_panes,
+            panes=[self._shell_outer_pane],
             watch_widgets=resize_watch,
         )
         # ---- legend canvases under plots
@@ -344,7 +165,28 @@ class App(tk.Tk):
         self.main()
         # ---- initial plot draw
         self.plot()
-        
+        if getattr(self.layout_glue, "_relayout_plots", None) is not None:
+            self.layout_glue._plots_layout_size = None
+            self.layout_glue._relayout_plots()
+        # Heavy OpenGL mesh init runs after the window is shown.
+        self.after_idle(self._deferred_mesh_init)
+
+
+    def _deferred_mesh_init(self) -> None:
+        glue = getattr(self, "layout_glue", None)
+        if glue is not None:
+            glue.finish_deferred_mesh()
+
+    def on_mesh_panel_ready(self) -> None:
+        panel = getattr(self, "mesh_panel", None)
+        if panel is None:
+            return
+        viewer = getattr(panel, "viewer", None)
+        mesh_ribbon = getattr(panel, "ribbon_pane", None)
+        register_resize_watch_widgets(
+            self,
+            [w for w in (viewer, mesh_ribbon) if w is not None],
+        )
 
     def capture_window(self,name=None):
             root=self
@@ -374,71 +216,29 @@ class App(tk.Tk):
             self.button_VT.config(text="Switch to VT Protocol")
         self.update_plot()
         
-    def set_figure(self, with_dvds=False):
-        """(Re)build the matplotlib figure embedded in ``frame1``.
+    def set_figure(self):
+        """(Re)build the matplotlib figure embedded in ``frame1``."""
+        def _on_canvas(canvas):
+            install_canvas_draw_guard(self)
+            glue = getattr(self, "layout_glue", None)
+            if glue is not None:
+                glue._plots_layout_size = None
 
-        Normally three stacked subplots (``top`` unipolar, ``mid`` bipolar,
-        ``bot`` reference). When ``with_dvds`` is True a 4th subplot ``dvds``
-        is inserted directly under the bipolar axis (order top, mid, dvds,
-        bot) for the global-patch dV/ds curve. Existing ``frame1`` widgets
-        and the previous figure are cleared first.
-        """
-        for widget in self.frame1.winfo_children():
-            widget.destroy()
-        self._patch_slider = None
-        self._patch_window_combo = None
-        self._patch_cursor_line = None
-        prev = getattr(self, "fig", None)
-        if prev is not None:
-            try:
-                plt.close(prev)
-            except Exception:
-                traceback.print_exc()
-
-        self.with_dvds = bool(with_dvds)
-        keys = ["top", "mid", "dvds", "bot"] if with_dvds else ["top", "mid", "bot"]
-        nrows = len(keys)
-
-        self.fig = plt.figure()
-        plt.subplots_adjust(left=0.05, right=0.98, top=0.9, bottom=0.05)
-        self.fig.clf()
-        self.axes = {}
-        for r, k in enumerate(keys):
-            self.axes[k] = self.fig.add_subplot(nrows, 1, r + 1)
-        self.axes["top"].set_xlim([0,2.5]); self.axes["top"].set_ylim([-1,1])
-        self.axes["mid"].set_xlim([0,2.5]); self.axes["mid"].set_ylim([-1,1])
-        self.axes["bot"].set_xlim([0,2.5]); self.axes["bot"].set_ylim([-10,10])
-        if with_dvds:
-            self.axes["dvds"].set_xlim([0,2.5]); self.axes["dvds"].set_ylim([0,1])
-        self._fig_nrows = nrows
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame1)
-        self.canvas.get_tk_widget().grid(column=0,row=0,rowspan=nrows,sticky=tk.NSEW)
-        install_canvas_draw_guard(self)
+        host = SignalFigureHost(self.frame1, on_canvas_created=_on_canvas)
+        host.attach_to(self)
+        self._figure_host = host
 
     def _build_legend_canvases(self):
-        """(Re)create the per-axis legend canvases and grid weights.
-
-        Driven by the current ``self.axes`` keys so it works for both the
-        3-row and 4-row (dv/ds) layouts.
-        """
-        self.ccs = {}
-        for r, key in enumerate(self.axes.keys()):
-            cc = tk.Canvas(self.frame1, width=110, height=130, bg="white", highlightbackground="white")
-            cc.grid(column=1, row=r, sticky="")
-            self.ccs[key] = cc
-        nrows = len(self.axes)
-        for r in range(nrows):
-            self.frame1.grid_rowconfigure(r, weight=1)
-        # The control row (slider/selector) sits just below the subplots.
-        self.frame1.grid_rowconfigure(nrows, weight=0)
-        self.frame1.grid_columnconfigure(0, weight=6)
-        self.frame1.grid_columnconfigure(1, weight=1)
+        host = getattr(self, "_figure_host", None)
+        if host is not None:
+            host.build_legend_canvases()
+            host.attach_to(self)
 
         
 
     def _bind_canvas_events(self):
         """Connect matplotlib canvas events. Re-run whenever the canvas is
-        rebuilt (e.g. when the dv/ds subplot is added)."""
+        rebuilt (e.g. after ``set_figure``)."""
         def mpl_arrow(event):
             if event.key=="right":
                 self.s_increase(event)
@@ -482,39 +282,22 @@ class App(tk.Tk):
         self.update_plot()
 
     def _original_labels_flat(self) -> list:
-        labels = []
-        for section in self.labels_memory:
-            labels.extend(section)
-        return labels
-
-    def _delta_text_for_table(self, delt) -> str:
-        summary = self._delta_summary_from_entry(delt)
-        if isinstance(summary, list):
-            return ", ".join(map(str, summary))
-        return str(summary)
+        return self.delta_store.original_labels_flat()
 
     def _sync_original_label_column(self) -> None:
-        """Add or remove the read-only ``original_label`` table column in place."""
+        """Fill ``original_label`` and show/hide the pre-allocated column."""
         col = "original_label"
         table = getattr(self, "table", None)
         if table is None:
             return
         tv = table.tree
         labels = self._original_labels_flat()
-        if self.show_original_labels:
-            after = "label_color" if "label_color" in list(tv["columns"]) else None
-            tv.insert_column(col, labels, after=after)
-            if col in self.Table.columns:
-                self.Table[col] = labels
-            elif "label_color" in self.Table.columns:
-                loc = self.Table.columns.get_loc("label_color") + 1
-                self.Table.insert(loc, col, labels)
-            else:
-                self.Table[col] = labels
-        else:
-            tv.remove_column(col)
-            if col in self.Table.columns:
-                self.Table = self.Table.drop(columns=[col])
+        if col not in list(tv["columns"]):
+            return
+        tv.update_column_values(col, labels)
+        if col in self.Table.columns:
+            self.Table[col] = labels
+        tv.set_column_visible(col, bool(self.show_original_labels))
 
     def _toggle_original_labels(self) -> None:
         self.show_original_labels = bool(self.show_original_labels_var.get())
@@ -561,482 +344,6 @@ class App(tk.Tk):
         try:
             if getattr(self, "mesh_glue", None) is not None:
                 self.mesh_glue.notify_delta_changed()
-        except Exception:
-            traceback.print_exc()
-
-    # --------------------------------------------------------------- global patch
-    def _mesh_viewer(self):
-        panel = getattr(self, "mesh_panel", None)
-        if panel is None:
-            return None
-        return getattr(panel, "viewer", None)
-
-    def _auto_reject_for_global_patch(self) -> int:
-        """Label points with < 3 stim windows or < 1 SR window as ``Reject``.
-
-        These signals can't contribute to a full S1/S2/S3 + SR global patch,
-        so they are auto-rejected (carto label + delta + table) before the
-        compute gathers anchors. Returns the number newly rejected.
-        """
-        n = 0
-        for gidx, entry in enumerate(self.delta):
-            if not (isinstance(entry, (list, tuple)) and len(entry) >= 3):
-                continue
-            if str(entry[1] or "").strip().lower() == "reject":
-                continue
-            c1 = entry[2]
-            if not isinstance(c1, dict):
-                continue
-            n_stim, n_sr = patch_global.count_valid_windows(c1)
-            if n_stim < 3 or n_sr < 1:
-                try:
-                    self._mark_row_reject(gidx, c1)
-                    n += 1
-                except Exception:
-                    traceback.print_exc()
-        return n
-
-    def _compute_global_patch_clicked(self) -> None:
-        """Build per-take/window |dV/ds| patch maps over all non-rejected points.
-
-        Each acquisition take/section is treated as a patch; for every take
-        and window type the take's electrodes interpolate the unipolar V over
-        the take's own footprint and the spatial gradient is cached. Runs the
-        heavy harmonic pipeline on a background thread, shows a progress
-        window, then (on success) adds the dv/ds subplot + time slider and
-        drives the cached field on the 3D mesh.
-        """
-        if getattr(self, "_global_patch_running", False):
-            return
-        viewer = self._mesh_viewer()
-        if viewer is None:
-            messagebox.showerror("Compute patch dv/ds", "3D mesh viewer is not available.")
-            return
-        if not any(isinstance(e, (list, tuple)) and len(e) >= 3 for e in self.delta):
-            messagebox.showinfo(
-                "Compute patch dv/ds",
-                "No analysed signals found. Run 'Compute all' first so each "
-                "point has its stim/SR windows populated, then try again.",
-            )
-            return
-        try:
-            if not viewer._mesh_loaded:
-                viewer._load_mesh()
-        except Exception:
-            traceback.print_exc()
-
-        self._global_patch_running = True
-        try:
-            self.button_global_patch.config(state=tk.DISABLED)
-        except Exception:
-            traceback.print_exc()
-
-        win = self._open_patch_progress_window()
-        start_t = time.time()
-
-        def progress_cb(done, total, msg):
-            self.after(0, lambda: self._update_patch_progress(win, done, total, msg, start_t))
-
-        section = self._active_section()
-
-        def worker():
-            try:
-                if self._patch_ops is None:
-                    self.after(0, lambda: self._update_patch_progress(
-                        win, 0, 1, "Building mesh operators…", start_t))
-                    ops = patch_global.build_shared_ops(self)
-                else:
-                    ops = self._patch_ops
-                res = patch_global.compute_section_patches(
-                    self, section, ops=ops, progress_cb=progress_cb)
-                self.after(0, lambda: self._on_first_patch_done(ops, section, res, win))
-            except Exception as exc:
-                traceback.print_exc()
-                self.after(0, lambda e=exc: self._on_global_patch_error(e, win))
-
-        threading.Thread(target=worker, daemon=True, name="patch-dvds").start()
-
-    def _open_patch_progress_window(self):
-        win = tk.Toplevel(self)
-        win.title("Compute patch dv/ds")
-        win.geometry("440x150")
-        win.transient(self)
-        tk.Label(
-            win, text="Computing per-patch |dV/ds| maps…",
-            font=("timesnewroman", 11, "bold"),
-        ).pack(pady=(14, 6))
-        pb = ttk.Progressbar(win, orient="horizontal", length=380, mode="determinate")
-        pb.pack(pady=4)
-        lbl = tk.Label(win, text="Starting…", font=("timesnewroman", 9))
-        lbl.pack(pady=2)
-        elapsed = tk.Label(win, text="Elapsed: 0.0 s", font=("timesnewroman", 9))
-        elapsed.pack(pady=2)
-        win._pb = pb
-        win._lbl = lbl
-        win._elapsed = elapsed
-        # Block the close button while computing.
-        win.protocol("WM_DELETE_WINDOW", lambda: None)
-        return win
-
-    def _update_patch_progress(self, win, done, total, msg, start_t):
-        if win is None or not win.winfo_exists():
-            return
-        try:
-            win._pb["value"] = (100.0 * done / total) if total else 0.0
-            win._lbl.config(text=f"{msg}  ({done}/{total})")
-            win._elapsed.config(text=f"Elapsed: {time.time() - start_t:.1f} s")
-        except Exception:
-            traceback.print_exc()
-
-    def _on_global_patch_error(self, exc, win):
-        self._global_patch_running = False
-        try:
-            self.button_global_patch.config(state=tk.NORMAL)
-        except Exception:
-            traceback.print_exc()
-        if win is not None and win.winfo_exists():
-            win.destroy()
-        messagebox.showerror("Compute patch dv/ds", f"Failed: {exc}")
-
-    def _on_first_patch_done(self, ops, section, res, win):
-        """Set up the patch UI after the first take has been computed."""
-        self._global_patch_running = False
-        try:
-            self.button_global_patch.config(state=tk.NORMAL)
-        except Exception:
-            traceback.print_exc()
-        if win is not None and win.winfo_exists():
-            win.destroy()
-        self._patch_ops = ops
-        if not res:
-            messagebox.showinfo(
-                "Compute patch dv/ds",
-                "This take has no qualifying patch.\n\nA take/window patch "
-                f"needs at least {patch_global._MIN_PATCH_ANCHORS} non-rejected "
-                "points with a measurable window. Run 'Compute all' first so "
-                "windows/references are populated, then navigate to a take "
-                "with enough points.",
-            )
-            return
-
-        self.patch_global_results = {int(section): res}
-        # All four windows are offered; takes lacking one just show "no patch".
-        order = list(patch_global.WINDOW_TYPES)
-        # Prefer the first window this take actually has.
-        self.patch_active_window = next(
-            (w for w in order if w in res), order[0]
-        )
-        self.patch_time_index = 0
-        self._patch_mode_on = True
-
-        # Rebuild the figure with the 4th dv/ds subplot, then re-create the
-        # legend canvases, event bindings, and the slider/selector controls.
-        self.set_figure(with_dvds=True)
-        self._build_legend_canvases()
-        self._bind_canvas_events()
-        self._build_patch_controls(order)
-        self._begin_patch_mesh_preview()
-        # Redraw signals (top/mid/bot) and refresh the active take's patch
-        # (mesh + dv/ds subplot). As the user navigates to other takes they
-        # are computed lazily and cached.
-        self.update_plot()
-        self._sync_patch_to_current_point()
-
-        wins_here = ", ".join(w for w in order if w in res)
-        messagebox.showinfo(
-            "Compute patch dv/ds",
-            f"Take {section} computed ({wins_here}).\n\nNavigate to other "
-            "points to compute their takes on demand (cached after the first "
-            "visit).",
-        )
-
-    def _sync_patch_to_current_point(self):
-        """Show the take owning the current point, computing it if needed."""
-        if not self._patch_mode_on or "dvds" not in getattr(self, "axes", {}):
-            return
-        sec = self._active_section()
-        if sec in self.patch_global_results:
-            self._refresh_active_patch()
-        else:
-            self._ensure_section_computed_async(sec)
-
-    def _ensure_section_computed_async(self, section):
-        """Compute one take's patches on a worker thread, then cache+refresh."""
-        sec = int(section)
-        if sec in self.patch_global_results or sec in self._patch_sections_computing:
-            self._refresh_active_patch()
-            return
-        if self._patch_ops is None:
-            return
-        self._patch_sections_computing.add(sec)
-        # Busy hint on the dv/ds subplot while the take computes.
-        try:
-            ax = self.axes.get("dvds")
-            if ax is not None:
-                ax.clear()
-                ax.set_title(f"dV/ds  [{self.patch_active_window}]  computing take {sec}…",
-                             fontsize=8)
-                ax.set_xlabel("time (s)", fontsize=7)
-                ax.set_ylabel("|dV/ds|", fontsize=7)
-                ax.set_xlim([0, 2.5])
-                self.canvas.draw_idle()
-        except Exception:
-            traceback.print_exc()
-
-        ops = self._patch_ops
-
-        def worker():
-            try:
-                res = patch_global.compute_section_patches(self, sec, ops=ops)
-                self.after(0, lambda: self._on_section_computed(sec, res))
-            except Exception:
-                traceback.print_exc()
-                self.after(0, lambda: self._on_section_computed(sec, {}))
-
-        threading.Thread(target=worker, daemon=True, name=f"patch-take-{sec}").start()
-
-    def _on_section_computed(self, section, res):
-        sec = int(section)
-        self._patch_sections_computing.discard(sec)
-        self.patch_global_results[sec] = res or {}
-        # Only refresh if the user is still on this take.
-        if self._active_section() == sec:
-            self._refresh_active_patch()
-
-    # ----- per-patch accessors -------------------------------------------
-    def _active_section(self) -> int:
-        """The take/section that owns the currently-navigated point."""
-        try:
-            return int(self.i)
-        except Exception:
-            return -1
-
-    def _active_patch_result(self):
-        """Result dict for the current take + active window, or ``None``."""
-        if not self.patch_global_results:
-            return None
-        bywt = self.patch_global_results.get(self._active_section())
-        if not bywt:
-            return None
-        return bywt.get(self.patch_active_window)
-
-    def _patch_abs_time_seconds(self, res, rel=None):
-        """Absolute signal time (seconds) for a patch result's sample axis.
-
-        Uses the currently-navigated point's own reference when it is an
-        anchor of this patch, else the patch's representative reference, so
-        the dv/ds curve lands where the window actually sits in the 0-2.5 s
-        trace.
-        """
-        if rel is None:
-            rel = res["rel"]
-        fs = float(res.get("fs") or patch_global.DEFAULT_FS) or patch_global.DEFAULT_FS
-        ref = int(res.get("ref_repr", 0))
-        try:
-            gidx = self.to_index[self.i][self.j]
-            c1 = self.delta[gidx][2]
-            span = patch_global._window_ref_and_span(c1, self.patch_active_window)
-            if span is not None:
-                ref = int(span[0])
-        except Exception:
-            pass
-        return (ref + np.asarray(rel, dtype=np.float64)) / fs
-
-    def _patch_full_field(self, res, idx):
-        """Scatter a patch sample into a full per-vertex array (NaN elsewhere)."""
-        n_v = int(np.asarray(self.carto.vertices).shape[0])
-        full = np.full(n_v, np.nan, dtype=np.float64)
-        pv = np.asarray(res["patch_vertices"], dtype=np.int64)
-        series = res["dvds_patch"]
-        k = max(0, min(series.shape[0] - 1, int(idx)))
-        full[pv] = np.asarray(series[k], dtype=np.float64)
-        return full
-
-    def _build_patch_controls(self, order):
-        """Window-type selector + time slider under the subplots (in frame1)."""
-        nrows = len(self.axes)
-        frame = tk.Frame(self.frame1, background="white")
-        frame.grid(column=0, row=nrows, columnspan=2, sticky="ew", pady=2)
-        tk.Label(frame, text="Window:", background="white").pack(side=tk.LEFT, padx=(4, 2))
-        self._patch_window_var = tk.StringVar(value=self.patch_active_window)
-        combo = ttk.Combobox(
-            frame, textvariable=self._patch_window_var, values=list(order),
-            state="readonly", width=6,
-        )
-        combo.pack(side=tk.LEFT, padx=4)
-        combo.bind("<<ComboboxSelected>>", self._on_patch_window_change)
-        self._patch_window_combo = combo
-        tk.Label(frame, text="Time:", background="white").pack(side=tk.LEFT, padx=(10, 2))
-        res = self._active_patch_result()
-        n = int(res["dvds_patch"].shape[0]) if res is not None else 1
-        self._patch_slider = ttk.Scale(
-            frame, from_=0, to=max(0, n - 1), orient="horizontal",
-            command=self._on_patch_slider_change,
-        )
-        self._patch_slider.pack(side=tk.LEFT, fill="x", expand=True, padx=6)
-        self._patch_time_label = tk.Label(frame, text="", background="white", width=12)
-        self._patch_time_label.pack(side=tk.LEFT, padx=6)
-        self._update_patch_time_label()
-
-    def _begin_patch_mesh_preview(self):
-        viewer = self._mesh_viewer()
-        if viewer is None or not self.patch_global_results:
-            return
-        try:
-            if viewer.begin_patch_preview(f"patch:dvds_{self.patch_active_window}"):
-                self._patch_preview_on = True
-        except Exception:
-            traceback.print_exc()
-
-    def _push_patch_field_to_mesh(self):
-        viewer = self._mesh_viewer()
-        res = self._active_patch_result()
-        if viewer is None or not self._patch_preview_on:
-            return
-        try:
-            if res is None:
-                # Current take has no patch for this window: blank the mesh.
-                n_v = int(np.asarray(self.carto.vertices).shape[0])
-                viewer.set_patch_preview_field(np.full(n_v, np.nan, dtype=np.float64))
-                return
-            viewer.set_patch_preview_field(self._patch_full_field(res, self.patch_time_index))
-        except Exception:
-            traceback.print_exc()
-
-    def _refresh_active_patch(self):
-        """Re-sync slider range, mesh field, colour range + subplot for the
-        take that owns the current point. Called after compute, on window
-        change, and whenever navigation lands on a different take."""
-        if not self.patch_global_results or "dvds" not in getattr(self, "axes", {}):
-            return
-        res = self._active_patch_result()
-        if res is not None:
-            n = int(res["dvds_patch"].shape[0])
-            self.patch_time_index = max(0, min(n - 1, int(self.patch_time_index)))
-            if self._patch_slider is not None:
-                try:
-                    self._patch_slider.configure(to=max(0, n - 1))
-                    self._patch_slider.set(self.patch_time_index)
-                except Exception:
-                    traceback.print_exc()
-            viewer = self._mesh_viewer()
-            if viewer is not None and self._patch_preview_on:
-                try:
-                    viewer.set_patch_preview_color_range(res["vmin"], res["vmax"])
-                except Exception:
-                    traceback.print_exc()
-        self._push_patch_field_to_mesh()
-        self._update_patch_time_label()
-        self._redraw_patch_subplot()
-
-    def _on_patch_slider_change(self, value):
-        if not self.patch_global_results or self.patch_active_window is None:
-            return
-        try:
-            idx = int(round(float(value)))
-        except (TypeError, ValueError):
-            return
-        res = self._active_patch_result()
-        if res is None:
-            return
-        n = int(res["dvds_patch"].shape[0])
-        self.patch_time_index = max(0, min(n - 1, idx))
-        self._push_patch_field_to_mesh()
-        self._update_patch_time_label()
-        self._update_patch_cursor()
-
-    def _on_patch_window_change(self, _event=None):
-        if self._patch_window_var is None:
-            return
-        wt = self._patch_window_var.get()
-        if wt not in patch_global.WINDOW_TYPES:
-            return
-        self.patch_active_window = wt
-        self.patch_time_index = 0
-        viewer = self._mesh_viewer()
-        if viewer is not None and self._patch_preview_on:
-            try:
-                viewer.set_patch_preview_label(f"patch:dvds_{wt}")
-            except Exception:
-                traceback.print_exc()
-        self._refresh_active_patch()
-
-    def _update_patch_time_label(self):
-        res = self._active_patch_result()
-        lbl = getattr(self, "_patch_time_label", None)
-        if lbl is None:
-            return
-        if res is None:
-            try:
-                lbl.config(text="—")
-            except Exception:
-                traceback.print_exc()
-            return
-        t_abs = self._patch_abs_time_seconds(res)
-        if 0 <= self.patch_time_index < t_abs.size:
-            try:
-                lbl.config(text=f"{t_abs[self.patch_time_index]:.3f} s")
-            except Exception:
-                traceback.print_exc()
-
-    def _redraw_patch_subplot(self):
-        """Draw the current point's patch dv/ds vs absolute time (0-2.5 s)."""
-        if not self.patch_global_results or "dvds" not in getattr(self, "axes", {}):
-            return
-        ax = self.axes["dvds"]
-        ax.clear()
-        self._patch_cursor_line = None
-        res = self._active_patch_result()
-        title = f"dV/ds  [{self.patch_active_window}]"
-        if res is None:
-            ax.set_title(title + "  (no patch for this take/window)", fontsize=8)
-            ax.set_xlabel("time (s)", fontsize=7)
-            ax.set_ylabel("|dV/ds|", fontsize=7)
-            ax.set_xlim([0, 2.5])
-            self.canvas.draw_idle()
-            return
-        t_abs = self._patch_abs_time_seconds(res)
-        try:
-            gidx = self.to_index[self.i][self.j]
-        except Exception:
-            gidx = -1
-        vidx = res["anchor_vertex"].get(int(gidx))
-        col = None
-        if vidx is not None:
-            pv = np.asarray(res["patch_vertices"], dtype=np.int64)
-            pos = int(np.searchsorted(pv, int(vidx)))
-            if 0 <= pos < pv.size and int(pv[pos]) == int(vidx):
-                col = pos
-        if col is not None and t_abs.size:
-            series = res["dvds_patch"][:, col]
-            ax.plot(t_abs, series, color="tab:purple", linewidth=1.0)
-            title += f"  point #{gidx}"
-        else:
-            title += "  (current point not an anchor for this take/window)"
-        if 0 <= self.patch_time_index < t_abs.size:
-            self._patch_cursor_line = ax.axvline(
-                float(t_abs[self.patch_time_index]), color="red", linewidth=1.0
-            )
-        ax.set_title(title, fontsize=8)
-        ax.set_xlabel("time (s)", fontsize=7)
-        ax.set_ylabel("|dV/ds|", fontsize=7)
-        ax.set_xlim([0, 2.5])
-        self.canvas.draw_idle()
-
-    def _update_patch_cursor(self):
-        res = self._active_patch_result()
-        if res is None or "dvds" not in getattr(self, "axes", {}):
-            return
-        t_abs = self._patch_abs_time_seconds(res)
-        if not (0 <= self.patch_time_index < t_abs.size):
-            return
-        x = float(t_abs[self.patch_time_index])
-        try:
-            if self._patch_cursor_line is not None:
-                self._patch_cursor_line.set_xdata([x, x])
-            else:
-                self._patch_cursor_line = self.axes["dvds"].axvline(x, color="red", linewidth=1.0)
-            self.canvas.draw_idle()
         except Exception:
             traceback.print_exc()
 
@@ -1129,9 +436,20 @@ class App(tk.Tk):
             return
 
         self.forcefull = bool(forcefull)
+        presenter = getattr(self, "plot_presenter", None)
+        if presenter is not None:
+            try:
+                presenter.capture_axes_view()
+            except Exception:
+                traceback.print_exc()
         # Cheap UI sync first so the click feels instant even on big sessions.
         for i in self.axes.values():
             i.clear()
+        if presenter is not None:
+            try:
+                presenter.restore_axes_view()
+            except Exception:
+                traceback.print_exc()
         try:
             point_number = self.cont[self.i][0].reset_index(drop=True)["point number"][self.j]
             self.label.config(text=f"point {point_number}")
@@ -1164,15 +482,11 @@ class App(tk.Tk):
             self.plot()
         except Exception:
             traceback.print_exc()
-        # Re-sync the patch (mesh + slider + dv/ds subplot) to the take that
-        # owns the new point, computing it lazily if not cached. The subplot
-        # was cleared by the loop above.
-        if self._patch_mode_on and "dvds" in self.axes:
+        if presenter is not None:
             try:
-                self._sync_patch_to_current_point()
+                presenter.restore_axes_view()
             except Exception:
                 traceback.print_exc()
-
     def p_increase(self,event=None):
         return self.controller.p_increase(event)
 
@@ -1193,70 +507,16 @@ class App(tk.Tk):
             filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
         )
         if file_path:
-            self.session_store.save_delta(path=file_path, delta=self.delta)
+            self.delta_store.save_to(file_path)
             print(f"File is saved in {file_path}")
-
-    def _delta_label_from_entry(self, index, delt):
-        try:
-            i, j = self.to_i_j[index]
-            point_number = self.carto.cont[i][0].loc[j, "point number"]
-            print(delt[0], delt[1], point_number)
-            if point_number == delt[0]:
-                self.carto.cont[i][0].loc[j, "label_color"] = delt[1]
-                return delt[1]
-            print(f"mismatch{point_number} {delt[0]}")
-            return "mismatch"
-        except Exception as e:
-            print(e)
-            traceback.print_exc()
-            return ""
-
-    def _delta_summary_from_entry(self, delt):
-        try:
-            summary = ", ".join(
-                [
-                    f"{key}: {', '.join([str(ii) for ii in value])}"
-                    for key, value in delt[2].items()
-                    if "voltage" not in key
-                ]
-            )
-            return [summary]
-        except Exception:
-            traceback.print_exc()
-            return ""
-
-    def _refresh_table_from_delta(self):
-        delta_texts = []
-        labels = []
-        for index, delt in enumerate(self.delta):
-            labels.append(self._delta_label_from_entry(index, delt))
-            delta_texts.append(self._delta_text_for_table(delt))
-
-        self.Table["delta"] = pd.Series(delta_texts)
-        self.Table["label_color"] = pd.Series(labels)
-        tv = self.table.tree
-        tv.update_column_values("delta", delta_texts)
-        tv.update_column_values("label_color", labels)
-        if self.show_original_labels:
-            orig = self._original_labels_flat()
-            cols = list(tv["columns"])
-            if "original_label" in cols:
-                tv.update_column_values("original_label", orig)
-                self.Table["original_label"] = orig
-            else:
-                self._sync_original_label_column()
-        try:
-            self._refresh_all_predictions()
-        except Exception:
-            traceback.print_exc()
 
     def _load_delta_dialog(self):
         file_path = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")])
         if not file_path:
             return
         print(f"Data loaded from {file_path}")
-        self.delta = self.session_store.load_delta(path=file_path)
-        self._refresh_table_from_delta()
+        self.delta_store.load_from(file_path)
+        self.delta_store.refresh_table_columns(self)
         try:
             if getattr(self, "mesh_glue", None) is not None:
                 self.mesh_glue.notify_delta_changed()
@@ -1266,7 +526,7 @@ class App(tk.Tk):
     def _open_meta_parameters_window(self):
         top_window = tk.Toplevel()
         top_window.attributes("-topmost", True)
-        tp(top_window, self)
+        StftSettingsDialog(top_window, self)
 
     def drop_down(self):
         menu=tk.Menu(master=self.frame1,tearoff=False)
@@ -1354,13 +614,7 @@ class App(tk.Tk):
             traceback.print_exc()
 
     def _clear_pos_proba_in_deltas(self) -> None:
-        """Remove cached POS probabilities so the mesh map stops using them."""
-        changed = False
-        for entry in self.delta:
-            if isinstance(entry, list) and len(entry) >= 3 and isinstance(entry[2], dict):
-                if entry[2].pop("pos_proba", None) is not None:
-                    changed = True
-        if changed:
+        if self.delta_store.clear_all_pos_proba():
             try:
                 if getattr(self, "mesh_glue", None) is not None:
                     self.mesh_glue.notify_delta_changed()
@@ -1408,47 +662,17 @@ class App(tk.Tk):
         else:
             self.pred_label.config(text="Predicted: (not computed)")
 
-    @staticmethod
-    def _min_peak_to_peak_mv(c1) -> float | None:
-        """Return min(SR, S1) peak-to-peak voltage, or None if neither exists.
-
-        The gate only looks at the SR window (``voltage_sinus[0]``) and the
-        first stim (``voltage_stim[0]``). ``False`` markers (presenter's
-        "no measurable window" flag) are skipped so the gate doesn't fire
-        on legitimately-missing data; if both are missing we return None
-        and the caller leaves the row alone.
-        """
-        if not isinstance(c1, dict):
-            return None
-        vals: list[float] = []
-        for key in ("voltage_sinus", "voltage_stim"):
-            arr = c1.get(key) or []
-            if not arr:
-                continue
-            v = arr[0]
-            if isinstance(v, bool):
-                continue
-            if isinstance(v, (int, float)):
-                vals.append(float(v))
-        return min(vals) if vals else None
-
     def _mark_row_reject(self, idx: int, c1) -> None:
         """Force ``Reject`` on carto label, delta, table cell. Idempotent."""
         try:
-            i, j = self.to_i_j[idx]
-            df = self.carto.cont[i][0]
-            df.iat[j, df.columns.get_loc("label_color")] = "Reject"
+            self.delta_store.set_carto_label(idx, "Reject")
         except Exception:
             traceback.print_exc()
         try:
-            entry = self.delta[idx]
-            if isinstance(entry, list) and len(entry) >= 2:
-                entry[1] = "Reject"
+            self.delta_store.set_entry_label(idx, "Reject")
         except Exception:
             traceback.print_exc()
         if isinstance(c1, dict):
-            # Drop any previous probability so the POS/NEG map stops
-            # rendering this electrode as an anchor.
             c1.pop("pos_proba", None)
         try:
             tv = self.table.tree
@@ -1465,6 +689,8 @@ class App(tk.Tk):
 
     def _predict_proba_for_entry(self, entry) -> float | None:
         """Positive-class probability for one delta entry, or None."""
+        from .ml import extract_features_from_delta_entry
+
         feats = extract_features_from_delta_entry(entry)
         if feats is None or self.ml_bundle is None or not self.ml_selected_models:
             return None
@@ -1523,29 +749,7 @@ class App(tk.Tk):
             self._update_pred_label_for_index(idx)
 
     def _predict_row(self, idx: int, *, notify_mesh: bool = True) -> None:
-        """Compute, store, and display the prediction for one table row.
-
-        Called from the presenter's persist step (so navigation and Compute
-        all both populate predictions) and from ``_refresh_all_predictions``
-        (so changing the selected model re-labels every row in one pass).
-
-        Two gates run before the model is invoked:
-
-        1. Voltage-based reject: if ``min(voltage_sinus[0], voltage_stim[0])``
-           (SR and S1 peak-to-peak) is below ``ML_PEAK_TO_PEAK_MIN_MV``
-           (0.1 mV), the row is forced to ``Reject`` on the carto label,
-           the delta entry, and the table. The mesh provider's existing
-           ``reject`` filter then excludes the point from every
-           interpolation pass.
-        2. Feature-based reject (training-time gate, < 0.05 mV stim min):
-           the feature extractor returns ``None`` and the predictor writes
-           an empty cell — the point is simply not predictable.
-
-        ``notify_mesh`` should be ``False`` when many rows are being
-        updated back-to-back; the caller is then responsible for one
-        final ``mesh_glue.notify_delta_changed()`` to refresh the field
-        dropdown and re-interpolate the map.
-        """
+        """Compute, store, and display the prediction for one table row."""
         if self.ml_bundle is None or not self.ml_selected_models:
             return
         try:
@@ -1556,8 +760,7 @@ class App(tk.Tk):
             self._write_prediction_cell(idx, "")
             return
         c1 = entry[2] if isinstance(entry, list) and len(entry) >= 3 else None
-        min_pp = self._min_peak_to_peak_mv(c1)
-        if min_pp is not None and min_pp < ML_PEAK_TO_PEAK_MIN_MV:
+        if should_reject_delta_entry(entry):
             self._mark_row_reject(idx, c1)
             self._write_prediction_cell(idx, "Reject")
             if notify_mesh:
@@ -1575,13 +778,9 @@ class App(tk.Tk):
             if proba is None:
                 c1.pop("pos_proba", None)
             else:
-                # Clamp to [0, 1] — probability strategy could overshoot
-                # very slightly under numerical noise.
                 c1["pos_proba"] = float(min(1.0, max(0.0, proba)))
         self._write_prediction_cell(idx, label)
         if notify_mesh:
-            # The POS/NEG probability anchor for this electrode just
-            # changed (added, updated, or removed) — refresh the map.
             try:
                 if getattr(self, "mesh_glue", None) is not None:
                     self.mesh_glue.notify_delta_changed(idx)

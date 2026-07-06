@@ -1,0 +1,119 @@
+"""STFT / spectrogram parameter dialog — wired to the main app at runtime."""
+
+from __future__ import annotations
+
+import tkinter as tk
+from typing import Any
+
+
+class StftSettingsDialog:
+    created = False
+
+    def __init__(self, root: tk.Toplevel, app: Any = None):
+        self.root = root
+        if StftSettingsDialog.created:
+            self.prot()
+            return
+        self.app = app
+        self.root.protocol("WM_DELETE_WINDOW", self.prot)
+        self.root.geometry("400x300")
+
+        title = tk.Label(self.root, text="STFT")
+        title.grid(column=0, row=0, sticky=tk.NS, columnspan=3)
+
+        ps = self.app.plot_settings
+        self.create_generic(ps.win_length, name="Window length", row=1, from__=2, to__=200, length__=100)
+        label_h = tk.Label(self.root, text="Hop length")
+        label_h.grid(column=0, row=2, sticky=tk.NS)
+        self.slider_H = tk.Scale(
+            self.root,
+            from_=0,
+            to=ps.win_length[0],
+            length=100,
+            resolution=1,
+            tickinterval=ps.win_length[0] // 4,
+            orient=tk.HORIZONTAL,
+        )
+        self.slider_H.grid(row=2, column=1, sticky=tk.EW, ipady=10)
+        self.entry_H = tk.Entry(self.root)
+
+        def slider_decorator(func, widget: tk.Scale, var: list, *args, **kwargs):
+            func(var=var, widget=widget, *args, **kwargs)
+            widget.config(from_=0, to=int(2 * ps.win_length[0]), tickinterval=int(2 * ps.win_length[0]) // 4)
+
+        self.slider_H.config(
+            command=lambda val, var=ps.hop_length, widget=self.slider_H, widget_entry=self.entry_H: slider_decorator(
+                self.Slider_function, var=var, val=val, widget=widget, widget_entry=widget_entry
+            )
+        )
+        self.entry_H.grid(column=2, row=2, sticky=tk.W)
+        entry_H_content = [""]
+        self.entry_H.insert(0, str(ps.hop_length[0]))
+        self.entry_H.bind(
+            "<Return>",
+            lambda event, var=ps.hop_length, prev=entry_H_content, widget=self.entry_H, widget_slider=self.slider_H: self.Entry_check(
+                event, var, prev, widget=widget, widget_slider=widget_slider
+            ),
+        )
+
+        self.create_generic(ps.high_b0, name="lower threshold of high frequency band pass filter", row=3, from__=10, to__=500)
+        self.create_generic(ps.high_b1, name="higher threshold of high frequency band pass filter", row=4, from__=10, to__=500)
+        self.create_generic(ps.low_b0, name="lower threshold of low frequency band pass filter", row=5, from__=1, to__=200)
+        self.create_generic(ps.low_b1, name="higher threshold of low frequency band pass filter", row=6, from__=1, to__=200)
+        self.create_generic(ps.len_hann, name="hanning window length applied on Energy", row=7, from__=1, to__=10)
+        self.create_generic(ps.TH, name="Threshold", row=8, from__=0, to__=1, resolution__=0.01, digit=3)
+
+        self.root.grid_columnconfigure((0, 1, 2), weight=1)
+        self.root.grid_rowconfigure((1, 2, 3, 4, 5, 6, 7, 8), weight=4)
+        self.root.grid_rowconfigure(0, weight=1)
+        StftSettingsDialog.created = True
+
+    def Entry_check(self, event, var: list, prev: list, widget: tk.Entry, widget_slider: tk.Scale):
+        entery = widget.get()
+        if prev[0] != entery:
+            try:
+                var[0] = float(entery)
+                widget_slider.set(int(entery))
+                self.app.update_plot(forcefull=True)
+            except Exception as e:
+                print("the format incorect", e)
+            prev[0] = entery
+
+    def Slider_function(self, var: list, val, widget: tk.Scale, widget_entry: tk.Entry):
+        try:
+            var[0] = float(val)
+            widget_entry.delete(0, tk.END)
+            widget_entry.insert(0, str(val))
+            self.app.after(10, lambda: self.app.update_plot(forcefull=True))
+        except Exception as e:
+            print("smth went wrong", e)
+
+    def create_generic(self, var, name="Window length", row=1, from__=2, to__=200, length__=100, resolution__=1, digit=None):
+        label_w = tk.Label(self.root, text=name)
+        label_w.grid(row=row, column=0)
+        self.slider_w = tk.Scale(
+            self.root, from_=from__, to=to__, length=length__, resolution=resolution__, tickinterval=(to__ - from__) / 4, orient=tk.HORIZONTAL
+        )
+        if digit:
+            self.slider_w.config(digits=digit)
+        self.slider_w.grid(row=row, column=1, sticky=tk.EW, ipady=10)
+        self.slider_w.set(var[0])
+        self.entry_w = tk.Entry(self.root)
+        self.slider_w.config(
+            command=lambda val, var=var, widget=self.slider_w, widget_entry=self.entry_w: self.Slider_function(
+                var=var, val=val, widget=widget, widget_entry=widget_entry
+            )
+        )
+        self.entry_w.grid(column=2, row=row, sticky=tk.W)
+        entry_w_content = [""]
+        self.entry_w.insert(0, str(var[0]))
+        self.entry_w.bind(
+            "<Return>",
+            lambda event, var=var, prev=entry_w_content, widget=self.entry_w, widget_slider=self.slider_w: self.Entry_check(
+                event, var, prev, widget=widget, widget_slider=widget_slider
+            ),
+        )
+
+    def prot(self):
+        StftSettingsDialog.created = False
+        self.root.destroy()

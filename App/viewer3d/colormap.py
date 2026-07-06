@@ -42,6 +42,26 @@ MAX_CUSTOM_BINS = 5
 MAX_INTERNAL_KNOTS = 8
 
 
+def default_custom_orange_green_palette(n: int) -> list[tuple[float, float, float]]:
+    """Default custom-bin colours: orange (low) → green (high), left to right."""
+    n = max(1, int(n))
+    orange = (1.0, 0.55, 0.0)
+    green = (0.15, 0.75, 0.20)
+    if n == 1:
+        return [orange]
+    out: list[tuple[float, float, float]] = []
+    for i in range(n):
+        t = i / float(n - 1)
+        out.append(
+            (
+                orange[0] * (1.0 - t) + green[0] * t,
+                orange[1] * (1.0 - t) + green[1] * t,
+                orange[2] * (1.0 - t) + green[2] * t,
+            )
+        )
+    return out
+
+
 def merge_knots01(knots: list[float]) -> list[float]:
     out: list[float] = []
     for x in sorted(knots):

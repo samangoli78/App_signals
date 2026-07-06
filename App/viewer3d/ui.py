@@ -9,14 +9,14 @@ import numpy as np
 
 from . import colormap as cmaplib
 from .viewer import CartoMeshViewer
-from ..ui.ribbon_widgets import (
+from ..shell import (
     build_ribbon_shell,
     collapsible_section,
     ribbon_button,
     ribbon_checkbox,
     ribbon_label,
 )
-from ..ui.resize_pause import attach_viewer_resize_pause
+from .resize_pause import attach_viewer_resize_pause
 
 class ColorbarSettingsDialog(tk.Toplevel):
     def __init__(self, viewer: CartoMeshViewer) -> None:
@@ -56,6 +56,10 @@ class ColorbarSettingsDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.after(10, self._place_near_viewer)
         self._sync_custom_from_viewer()
+        if self.viewer.color_mode == "custom":
+            self._nb.select(self._tab_custom)
+        else:
+            self._nb.select(self._tab_std)
 
     def _place_near_viewer(self) -> None:
         try:
@@ -100,7 +104,7 @@ class ColorbarSettingsDialog(tk.Toplevel):
         row += 1
 
         self._auto_var = tk.BooleanVar(value=bool(st["auto_range"]))
-        ttk.Checkbutton(body, text="Auto range (2-98 percentile)", variable=self._auto_var, command=self._on_auto).grid(
+        ttk.Checkbutton(body, text="Auto range (data min / max)", variable=self._auto_var, command=self._on_auto).grid(
             row=row, column=0, columnspan=2, sticky="w"
         )
         row += 1
@@ -167,7 +171,7 @@ class ColorbarSettingsDialog(tk.Toplevel):
         self._vmin_e.configure(state=st)
         self._vmax_e.configure(state=st)
         if self._auto_var.get():
-            lo, hi = self.viewer._resolved_range()
+            lo, hi = self.viewer.get_data_range()
             self._vmin_var.set(f"{lo:.6g}")
             self._vmax_var.set(f"{hi:.6g}")
         self._std_preview()
@@ -360,15 +364,19 @@ class ColorbarSettingsDialog(tk.Toplevel):
             n = len(existing)
             self._cust_n.set(n)
 
-        st = self.viewer.get_color_state()
+        dmin, dmax = self.viewer.get_data_range()
         try:
             lo = float(self._vmin_var.get())
             hi = float(self._vmax_var.get())
         except (ValueError, tk.TclError):
-            lo, hi = float(st["vmin"]), float(st["vmax"])
-        if hi <= lo:
-            hi = lo + 1.0
-        palette = [(0.2, 0.45, 0.95), (0.15, 0.85, 0.35), (0.95, 0.75, 0.15), (0.95, 0.35, 0.2), (0.75, 0.35, 0.9)]
+            lo, hi = dmin, dmax
+        if self._auto_var.get():
+            lo, hi = dmin, dmax
+        elif hi <= lo:
+            lo, hi = dmin, dmax
+            if hi <= lo:
+                hi = lo + 1.0
+        palette = cmaplib.default_custom_orange_green_palette(n)
         for i in range(n):
             if existing and i < len(existing):
                 b = existing[i]
@@ -1078,7 +1086,8 @@ class CartoMeshPanel(tk.Frame):
             body,
             text="Legacy Carto .vtk (version 4.1):\n"
             "PatientData header, SCALARS scalars double [0–1],\n"
-            "LOOKUP_TABLE lookup_table (1000 rows, 4 color bands), NORMALS Normals float.\n"
+            "LOOKUP_TABLE lookup_table (4 colour bands by default), NORMALS Normals float.\n"
+            "Mesh POINTS are multiplied by the Carto registration matrix before export.\n"
             "Triangle winding is swapped for Carto-compatible face orientation.",
             justify="left",
         ).pack(anchor="w", pady=(0, 8))
@@ -1086,6 +1095,32 @@ class CartoMeshPanel(tk.Frame):
         ttk.Label(body, text="Patient name:").pack(anchor="w")
         name_var = tk.StringVar()
         ttk.Entry(body, textvariable=name_var, width=48).pack(fill="x", pady=(4, 10))
+
+        opts = ttk.Frame(body)
+        opts.pack(fill="x", pady=(0, 8))
+        ttk.Label(opts, text="Lookup table bands:").grid(row=0, column=0, sticky="w")
+        from . import vtk_delta_export as vde
+
+        lut_var = tk.IntVar(value=int(vde.VTK_LUT_DEFAULT_BANDS))
+        lut_spin = ttk.Spinbox(
+            opts,
+            from_=2,
+            to=64,
+            increment=1,
+            textvariable=lut_var,
+            width=8,
+        )
+        lut_spin.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        ttk.Label(opts, text="(default 4: blue, cyan, yellow, red)", foreground="#666").grid(
+            row=0, column=2, sticky="w", padx=(6, 0)
+        )
+
+        export_pts_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opts,
+            text="Export points VTK (spheres: POS green, NEG orange, Reject grey)",
+            variable=export_pts_var,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         ttk.Label(
             body,
@@ -1115,7 +1150,18 @@ class CartoMeshPanel(tk.Frame):
             if not folder:
                 return
             try:
-                n = int(self.viewer.export_vtk_deltas(folder, patient_name=patient_name))
+                lut_bands = int(lut_var.get())
+            except (tk.TclError, ValueError):
+                lut_bands = int(vde.VTK_LUT_DEFAULT_BANDS)
+            try:
+                n = int(
+                    self.viewer.export_vtk_deltas(
+                        folder,
+                        patient_name=patient_name,
+                        lut_bands=lut_bands,
+                        export_points=bool(export_pts_var.get()),
+                    )
+                )
                 if n <= 0:
                     messagebox.showwarning(
                         "VTK export",

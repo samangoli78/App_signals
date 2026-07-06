@@ -12,6 +12,7 @@ import threading
 import time as _time
 import tkinter as tk
 import traceback
+from pathlib import Path
 
 import numpy as np
 
@@ -163,7 +164,7 @@ class CartoMeshViewer(OpenGLFrame):
         self.scalar_field = scalar_field if scalar_field in cm.SCALAR_FIELDS else "bipolar"
 
         self.cmap_name = cmap_name
-        self.reverse_cmap = False
+        self.reverse_cmap = True
         self.n_bins = 256
         self.auto_range = True
         self.vmin: float | None = None
@@ -293,19 +294,6 @@ class CartoMeshViewer(OpenGLFrame):
         self._interp_serial = 0
         self._interp_applied_serial = 0
 
-        # Acquisition patch tool drives the main mesh with a temporary scalar field.
-        self._patch_preview_active: bool = False
-        self._patch_preview_snap: dict | None = None
-        self._patch_vector_bases: np.ndarray | None = None
-        self._patch_vector_dirs: np.ndarray | None = None
-        self._patch_vector_mags: np.ndarray | None = None
-        self._patch_vector_scale: float = 1.0
-        self._patch_vector_mag_max: float = 1.0
-        self._patch_anchor_idx: np.ndarray | None = None
-        self._patch_anchor_labels: list[str] = []
-        self._selected_patch_anchor: int | None = None
-        self._hover_patch_anchor: int | None = None
-
         # LUT texture for mesh shading.
         self._tex_id: int | None = None
         self._lut_nearest = False
@@ -411,8 +399,7 @@ class CartoMeshViewer(OpenGLFrame):
         if not finite.any():
             return 0.0, 1.0
         valid = scalars[finite]
-        smin, smax = np.percentile(valid, [2.0, 98.0])
-        return float(smin), float(smax)
+        return float(np.min(valid)), float(np.max(valid))
 
     def _effective_cmap(self):
         name = cm.effective_cmap_name(self.cmap_name, self.reverse_cmap)
@@ -534,8 +521,7 @@ class CartoMeshViewer(OpenGLFrame):
         if not finite.any():
             return 0.0, 1.0
         valid = scalars[finite]
-        smin, smax = np.percentile(valid, [2.0, 98.0])
-        return float(smin), float(smax)
+        return float(np.min(valid)), float(np.max(valid))
 
     def _dispose_mesh_gl_resources(self) -> None:
         """Delete mesh VAO/VBO/EBO and optional shader program."""
@@ -922,6 +908,14 @@ class CartoMeshViewer(OpenGLFrame):
             return self._elec_proj_raw
         return self._elec_xyz_raw
 
+    def _elec_positions_raw(self) -> np.ndarray:
+        """Electrode positions in mesh raw coords (respects projected/original toggle)."""
+        return self._anchor_source_xyz_raw()
+
+    def _sphere_radius_raw(self) -> float:
+        """Electrode sphere radius in mesh raw units (matches on-screen size)."""
+        return float(self._mesh_radius * self._current_sphere_radius())
+
     def _recompute_anchor_vidx(self) -> None:
         """Map each electrode to the mesh vertex used as a harmonic anchor."""
         if not self._mesh_loaded or self._elec_xyz_raw.shape[0] == 0:
@@ -1012,209 +1006,6 @@ class CartoMeshViewer(OpenGLFrame):
         self._delta_provider = provider
         self._notify_fields_changed()
 
-    # ---------------------------------------------- acquisition patch preview
-    def begin_patch_preview(self, field_label: str = "patch:unipolar") -> bool:
-        """Take over mesh coloring for :class:`AcquisitionPatchWindow` until :meth:`end_patch_preview`."""
-        if not self._mesh_loaded:
-            try:
-                self._load_mesh()
-            except Exception:
-                traceback.print_exc()
-        if not self._mesh_loaded:
-            return False
-        if not self._patch_preview_active:
-            snap_scalars = None
-            if self._scalars is not None:
-                snap_scalars = np.asarray(self._scalars, dtype=np.float32).copy()
-            self._patch_preview_snap = {
-                "scalar_field": self.scalar_field,
-                "scalars": snap_scalars,
-                "auto_range": self.auto_range,
-                "vmin": self.vmin,
-                "vmax": self.vmax,
-                "current_delta_metric": self._current_delta_metric,
-                "color_snap": self.snapshot_color_settings(),
-            }
-            self._patch_preview_active = True
-        self._patch_vector_bases = None
-        self._patch_vector_dirs = None
-        self._patch_vector_mags = None
-        self.scalar_field = str(field_label)
-        self._current_delta_metric = None
-        self.auto_range = True
-        self.vmin = None
-        self.vmax = None
-        n = int(np.asarray(self.carto.vertices).shape[0])
-        self._scalars = np.full(n, np.nan, dtype=np.float32)
-        self._recompute_colors()
-        self._request_redraw()
-        return True
-
-    def set_patch_preview_field(self, scalars: np.ndarray) -> None:
-        """Update harmonic field on the main mesh (full vertex array, NaN outside patch)."""
-        if not self._patch_preview_active or not self._mesh_loaded:
-            return
-        n = int(np.asarray(self.carto.vertices).shape[0])
-        s = np.asarray(scalars, dtype=np.float32).reshape(-1)
-        if s.size != n:
-            raise ValueError(f"patch scalars length {s.size} != mesh vertices {n}")
-        self._scalars = s
-        # Keep ``auto_range`` / ``vmin`` / ``vmax`` set by
-        # :meth:`set_patch_preview_color_range` — do not reset per time step.
-        self._recompute_colors()
-        self._request_redraw()
-
-    def set_patch_preview_scalars(self, scalars: np.ndarray) -> None:
-        """Alias for :meth:`set_patch_preview_field`."""
-        self.set_patch_preview_field(scalars)
-
-    def set_patch_preview_label(self, field_label: str) -> None:
-        if self._patch_preview_active:
-            self.scalar_field = str(field_label)
-            self._request_redraw()
-
-    def set_patch_preview_color_range(
-        self, vmin: float, vmax: float, *, auto_range: bool = False
-    ) -> None:
-        """Fixed colorbar limits for patch preview (global over all time samples)."""
-        if not self._patch_preview_active or not self._mesh_loaded:
-            return
-        self.auto_range = bool(auto_range)
-        if not auto_range:
-            self.vmin = float(vmin)
-            self.vmax = float(vmax)
-        else:
-            self.vmin = None
-            self.vmax = None
-        if self._scalars is not None:
-            self._recompute_colors()
-        self._request_redraw()
-
-    def set_patch_preview_vectors(
-        self,
-        bases: np.ndarray | None,
-        directions: np.ndarray | None,
-        magnitudes: np.ndarray | None,
-        *,
-        scale: float | None = None,
-    ) -> None:
-        """Overlay arrows at electrode neighbourhoods (patch preview only)."""
-        if not self._patch_preview_active:
-            return
-        if bases is None or directions is None or magnitudes is None:
-            self._patch_vector_bases = None
-            self._patch_vector_dirs = None
-            self._patch_vector_mags = None
-        else:
-            self._patch_vector_bases = np.asarray(bases, dtype=np.float64).reshape(-1, 3)
-            self._patch_vector_dirs = np.asarray(directions, dtype=np.float64).reshape(-1, 3)
-            self._patch_vector_mags = np.asarray(magnitudes, dtype=np.float64).reshape(-1)
-            # Vectors always use |magnitude|; direction comes from geometry only.
-            self._patch_vector_mags = np.abs(self._patch_vector_mags)
-            n = self._patch_vector_bases.shape[0]
-            if self._patch_vector_dirs.shape[0] != n or self._patch_vector_mags.shape[0] != n:
-                raise ValueError("patch vector array length mismatch")
-            fin = self._patch_vector_mags[np.isfinite(self._patch_vector_mags)]
-            self._patch_vector_mag_max = (
-                float(np.max(np.abs(fin))) if fin.size else 1.0
-            )
-            if self._patch_vector_mag_max <= 0:
-                self._patch_vector_mag_max = 1.0
-        if scale is not None:
-            self._patch_vector_scale = max(1e-9, float(scale))
-        self._request_redraw()
-
-    def set_patch_preview_anchors(
-        self,
-        anchor_idx: np.ndarray | None,
-        labels: list[str] | None = None,
-        *,
-        selected: int | None = None,
-    ) -> None:
-        """Highlight patch electrode vertices (mesh indices) during patch preview."""
-        if not self._patch_preview_active:
-            return
-        if anchor_idx is None:
-            self._patch_anchor_idx = None
-            self._patch_anchor_labels = []
-            self._selected_patch_anchor = None
-        else:
-            self._patch_anchor_idx = np.asarray(anchor_idx, dtype=np.int64).ravel()
-            self._patch_anchor_labels = list(labels or [])
-            if selected is not None:
-                self._selected_patch_anchor = int(selected)
-        self._request_redraw()
-
-    def set_patch_preview_selected_anchor(self, index: int | None) -> None:
-        if not self._patch_preview_active:
-            return
-        self._selected_patch_anchor = None if index is None else int(index)
-        self._request_redraw()
-
-    def clear_patch_preview_vectors(self) -> None:
-        self.set_patch_preview_vectors(None, None, None)
-
-    def set_patch_preview_color_style(
-        self,
-        cmap_name: str | None = None,
-        reverse: bool | None = None,
-        n_bins: int | None = None,
-        color_mode: str | None = None,
-        piece_knots: list[float] | None = None,
-        custom_bins: list[dict] | None = None,
-    ) -> None:
-        """Colormap / bin settings while patch preview is active."""
-        if not self._patch_preview_active:
-            return
-        self.apply_color_settings(
-            cmap_name=cmap_name,
-            reverse=reverse,
-            n_bins=n_bins,
-            color_mode=color_mode,
-            piece_knots=piece_knots,
-            custom_bins=custom_bins,
-        )
-
-    def end_patch_preview(self) -> None:
-        if not self._patch_preview_active:
-            return
-        snap = self._patch_preview_snap or {}
-        self._patch_preview_active = False
-        self._patch_preview_snap = None
-        self._patch_vector_bases = None
-        self._patch_vector_dirs = None
-        self._patch_vector_mags = None
-        self._patch_anchor_idx = None
-        self._patch_anchor_labels = []
-        self._selected_patch_anchor = None
-        self._hover_patch_anchor = None
-        color_snap = snap.get("color_snap")
-        if color_snap:
-            try:
-                self.restore_color_settings(color_snap)
-            except Exception:
-                traceback.print_exc()
-        self.scalar_field = snap.get("scalar_field", "bipolar")
-        self._current_delta_metric = snap.get("current_delta_metric")
-        self.auto_range = bool(snap.get("auto_range", True))
-        self.vmin = snap.get("vmin")
-        self.vmax = snap.get("vmax")
-        if str(self.scalar_field).startswith("delta:") and self._mesh_loaded:
-            self._compute_delta_interpolated()
-        elif self.scalar_field in cm.SCALAR_FIELDS and self._mesh_loaded:
-            try:
-                self._scalars = np.asarray(
-                    getattr(self.carto, self.scalar_field), dtype=np.float32
-                ).reshape(-1)
-            except Exception:
-                traceback.print_exc()
-                self._scalars = snap.get("scalars")
-        else:
-            self._scalars = snap.get("scalars")
-        if self._scalars is not None:
-            self._recompute_colors()
-        self._request_redraw()
-
     def set_interpolation_enabled(self, flag: bool) -> None:
         new = bool(flag)
         if new == self.interpolation_enabled:
@@ -1259,16 +1050,25 @@ class CartoMeshViewer(OpenGLFrame):
             except Exception:
                 traceback.print_exc()
 
-    def export_vtk_deltas(self, folder: str, *, patient_name: str | None = None) -> int:
-        """Write one legacy ASCII ``.vtk`` per delta metric (Carto legacy layout)."""
+    def export_vtk_deltas(
+        self,
+        folder: str,
+        *,
+        patient_name: str | None = None,
+        lut_bands: int | None = None,
+        export_points: bool = False,
+    ) -> int:
+        """Write legacy ASCII ``.vtk`` per delta metric (and optionally electrode spheres)."""
         from . import vtk_delta_export as vde
 
         if self._delta_provider is None:
             raise RuntimeError("Delta provider is not registered on the viewer.")
         if not self._mesh_loaded:
             raise RuntimeError("Load a mesh before exporting VTK.")
-        lut = vde.carto_lookup_table_rgba()
-        return int(
+
+        lut_n = max(2, min(64, int(lut_bands or vde.VTK_LUT_DEFAULT_BANDS)))
+        lut = vde.carto_lookup_table_rgba(lut_bands=lut_n)
+        n = int(
             vde.export_all_delta_metrics(
                 folder,
                 carto=self.carto,
@@ -1282,8 +1082,28 @@ class CartoMeshViewer(OpenGLFrame):
                 lookup_table_rgba=lut,
                 include_normals=True,
                 swap_winding=True,
+                lut_bands=lut_n,
             )
         )
+
+        if export_points and self._elec_xyz_raw.shape[0] > 0:
+            provider = self._delta_provider
+            label_fn = getattr(provider, "get_electrode_label_color", None)
+            if not callable(label_fn):
+                raise RuntimeError("Delta provider does not expose get_electrode_label_color().")
+            pts_path = Path(folder) / "points.vtk"
+            if vde.export_electrode_points_vtk(
+                pts_path,
+                carto=self.carto,
+                elec_raw=self._elec_positions_raw(),
+                elec_global_idx=list(self._elec_global_idx),
+                label_color_for=label_fn,
+                sphere_radius_raw=self._sphere_radius_raw(),
+                patient_name=patient_name,
+            ):
+                n += 1
+
+        return n
 
     def notify_delta_changed(self, global_idx=None) -> None:
         """Called by the app/mediator when delta entries have changed."""
@@ -1330,8 +1150,6 @@ class CartoMeshViewer(OpenGLFrame):
             self._interp_serial += 1
             self._interp_applied_serial = self._interp_serial
             self._interp_pending = None
-        if self._patch_preview_active:
-            return
         self._scalars = np.asarray(f, dtype=np.float32)
         if self.auto_range:
             self.vmin = None
@@ -1801,8 +1619,6 @@ class CartoMeshViewer(OpenGLFrame):
             if serial != self._interp_serial:
                 return
             self._interp_applied_serial = serial
-            if self._patch_preview_active:
-                return
             self._scalars = f
             if self.auto_range:
                 self.vmin = None
@@ -1917,6 +1733,19 @@ class CartoMeshViewer(OpenGLFrame):
             vmax = vmin + 1.0
 
         nseg = 96
+        rgb_lut, _ = cm.build_1d_lut_rgb(
+            lut_width=nseg,
+            color_mode=self.color_mode,
+            cmap_name=self.cmap_name,
+            reverse_cmap=self.reverse_cmap,
+            n_bins=self.n_bins,
+            piece_knots=self.piece_knots,
+            custom_bins=self.custom_bins,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        rgb_f = rgb_lut.astype(np.float32) / 255.0
+
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
         glDisable(GL_TEXTURE_1D)
@@ -1924,12 +1753,10 @@ class CartoMeshViewer(OpenGLFrame):
         self._enter_ortho(w, h)
 
         if self.cb_orientation == "vertical":
-            vals = np.linspace(vmax, vmin, nseg)
             ys = np.linspace(y0, y1, nseg)
-            rgb = self._scalar_values_to_rgb(vals)
             for i in range(nseg - 1):
-                r0, g0, b0 = rgb[i]
-                r1, g1, b1 = rgb[i + 1]
+                r0, g0, b0 = rgb_f[nseg - 1 - i]
+                r1, g1, b1 = rgb_f[nseg - 1 - (i + 1)]
                 ya, yb = ys[i], ys[i + 1]
                 glBegin(GL_QUADS)
                 glColor3f(float(r0), float(g0), float(b0))
@@ -1940,12 +1767,10 @@ class CartoMeshViewer(OpenGLFrame):
                 glVertex2f(x0, yb)
                 glEnd()
         else:
-            vals = np.linspace(vmin, vmax, nseg)
             xs = np.linspace(x0, x1, nseg)
-            rgb = self._scalar_values_to_rgb(vals)
             for i in range(nseg - 1):
-                r0, g0, b0 = rgb[i]
-                r1, g1, b1 = rgb[i + 1]
+                r0, g0, b0 = rgb_f[i]
+                r1, g1, b1 = rgb_f[i + 1]
                 xa, xb = xs[i], xs[i + 1]
                 glBegin(GL_QUADS)
                 glColor3f(float(r0), float(g0), float(b0))
@@ -2180,297 +2005,22 @@ class CartoMeshViewer(OpenGLFrame):
         glEnable(GL_DEPTH_TEST)
         self._setup_camera(w, h)
         self._render_mesh_lit()
-        self._render_patch_anchors()
-        self._render_patch_vectors_3d()
         self._render_spheres_color()
 
-    def _patch_anchor_positions_norm(self) -> np.ndarray:
-        if self._patch_anchor_idx is None or self._verts_flat is None:
-            return np.zeros((0, 3), dtype=np.float64)
-        idx = np.asarray(self._patch_anchor_idx, dtype=np.int64).ravel()
-        verts = np.asarray(self._verts_flat, dtype=np.float64).reshape(-1, 3)
-        idx = idx[(idx >= 0) & (idx < verts.shape[0])]
-        if idx.size == 0:
-            return np.zeros((0, 3), dtype=np.float64)
-        return verts[idx]
-
-    def _pick_pool_sizes(self) -> tuple[int, int, int]:
+    def _pick_pool_sizes(self) -> tuple[int, int]:
         n_sph = int(self._elec_xyz_norm.shape[0])
         n_tris = int(self._indices.size // 3) if self._indices is not None else 0
-        n_patch = int(self._patch_anchor_idx.size) if (
-            self._patch_preview_active and self._patch_anchor_idx is not None
-        ) else 0
-        return n_sph, n_tris, n_patch
+        return n_sph, n_tris
 
     def _decode_pick_id(self, pick_id: int) -> tuple[str, int]:
-        n_sph, n_tris, n_patch = self._pick_pool_sizes()
+        n_sph, n_tris = self._pick_pool_sizes()
         if pick_id <= 0:
             return "empty", -1
         if pick_id <= n_sph:
             return "sphere", pick_id - 1
         if pick_id <= n_sph + n_tris:
             return "triangle", pick_id - 1 - n_sph
-        if self._patch_preview_active and pick_id <= n_sph + n_tris + n_patch:
-            return "patch_anchor", pick_id - 1 - n_sph - n_tris
         return "empty", -1
-
-    def _render_patch_vectors_3d(self) -> None:
-        """White 3D arrows on the mesh (normalized coords, always visible)."""
-        if not self._patch_preview_active:
-            return
-        bases = self._patch_vector_bases
-        dirs = self._patch_vector_dirs
-        mags = self._patch_vector_mags
-        if bases is None or dirs is None or mags is None:
-            return
-
-        try:
-            from OpenGL.GL import glUseProgram
-
-            glUseProgram(0)
-        except Exception:
-            pass
-
-        scale = float(self._patch_vector_scale)
-        if scale <= 0:
-            return
-        r = max(float(self._mesh_radius), 1e-9)
-        norm_len_scale = scale / r
-
-        verts: list[list[float]] = []
-        bases = np.asarray(bases, dtype=np.float64).reshape(-1, 3)
-        dirs = np.asarray(dirs, dtype=np.float64).reshape(-1, 3)
-        mags = np.abs(np.asarray(mags, dtype=np.float64).reshape(-1))
-        for i in range(bases.shape[0]):
-            mag = float(mags[i])
-            if not np.isfinite(mag) or mag <= 0.0:
-                continue
-            d = dirs[i]
-            dn = float(np.linalg.norm(d))
-            if dn < 1e-12 or not np.all(np.isfinite(bases[i])):
-                continue
-            d = d / dn
-            b_n = self._raw_to_render_norm(bases[i].reshape(1, 3))[0]
-            length_n = mag * norm_len_scale
-            if length_n < 1e-6:
-                continue
-            tip_n = b_n + d * length_n
-            verts.append([float(b_n[0]), float(b_n[1]), float(b_n[2])])
-            verts.append([float(tip_n[0]), float(tip_n[1]), float(tip_n[2])])
-
-        if not verts:
-            return
-
-        arr = np.ascontiguousarray(np.asarray(verts, dtype=np.float32))
-        glDisable(GL_LIGHTING)
-        glDisable(GL_TEXTURE_1D)
-        glDisable(GL_DEPTH_TEST)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glLineWidth(4.5)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-        glEnableClientState(GL_VERTEX_ARRAY)
-        glVertexPointer(3, GL_FLOAT, 0, arr)
-        glDrawArrays(GL_LINES, 0, int(arr.shape[0]))
-        glDisableClientState(GL_VERTEX_ARRAY)
-        glLineWidth(1.0)
-        glEnable(GL_DEPTH_TEST)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-
-    def _render_patch_anchors(self) -> None:
-        """Small point markers on patch electrode vertices (selected = highlight)."""
-        if (
-            not self._patch_preview_active
-            or self._patch_anchor_idx is None
-            or self._verts_flat is None
-            or self._patch_anchor_idx.size == 0
-        ):
-            return
-        positions = self._patch_anchor_positions_norm()
-        if positions.shape[0] == 0:
-            return
-        sel = self._selected_patch_anchor
-
-        try:
-            from OpenGL.GL import glUseProgram
-
-            glUseProgram(0)
-        except Exception:
-            pass
-
-        glDisable(GL_LIGHTING)
-        glDisable(GL_TEXTURE_1D)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glEnable(GL_DEPTH_TEST)
-
-        pts = np.ascontiguousarray(positions, dtype=np.float32)
-        glEnableClientState(GL_VERTEX_ARRAY)
-
-        if sel is not None and 0 <= int(sel) < pts.shape[0]:
-            one = np.ascontiguousarray(pts[int(sel) : int(sel) + 1, :], dtype=np.float32)
-            glVertexPointer(3, GL_FLOAT, 0, one)
-            glPointSize(10.0)
-            glColor4f(1.0, 0.82, 0.08, 1.0)
-            glDrawArrays(GL_POINTS, 0, 1)
-
-        glDisableClientState(GL_VERTEX_ARRAY)
-        glPointSize(1.0)
-
-    @staticmethod
-    def _gl_matrix4() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        mv = np.array(glGetDoublev(GL_MODELVIEW_MATRIX), dtype=np.float64).reshape(4, 4, order="F")
-        pr = np.array(glGetDoublev(GL_PROJECTION_MATRIX), dtype=np.float64).reshape(4, 4, order="F")
-        vp = np.array(glGetDoublev(GL_VIEWPORT), dtype=np.float64).ravel()
-        return mv, pr, vp
-
-    def _project_norm_to_window(
-        self, x: float, y: float, z: float, w: int, h: int
-    ) -> tuple[float, float] | None:
-        """Project normalized mesh coords to window pixels (top-left origin)."""
-        try:
-            mv, pr, vp = self._gl_matrix4()
-            p = np.array([float(x), float(y), float(z), 1.0], dtype=np.float64)
-            clip = pr @ (mv @ p)
-            if not np.isfinite(clip[3]) or abs(float(clip[3])) < 1e-12:
-                return None
-            ndc = clip[:3] / clip[3]
-            sx = float(vp[0] + (ndc[0] + 1.0) * 0.5 * vp[2])
-            sy = float(vp[1] + (ndc[1] + 1.0) * 0.5 * vp[3])
-            if not (np.isfinite(sx) and np.isfinite(sy)):
-                return None
-            return sx, float(h) - sy
-        except Exception:
-            return None
-
-    @staticmethod
-    def _draw_screen_arrow_2d(
-        x0: float,
-        y0: float,
-        x1: float,
-        y1: float,
-        *,
-        head_len: float = 9.0,
-        head_half: float = 5.0,
-    ) -> None:
-        """Flat 2D arrow in pixel space (always on top of the mesh)."""
-        dx = x1 - x0
-        dy = y1 - y0
-        seg_len = float(math.hypot(dx, dy))
-        if seg_len < 0.5:
-            glBegin(GL_LINES)
-            glVertex2f(x0, y0)
-            glVertex2f(x0 + 1.0, y0)
-            glEnd()
-            return
-        ux, uy = dx / seg_len, dy / seg_len
-        # Shorten shaft so arrowhead sits at the tip.
-        shaft_end_x = x1 - ux * head_len
-        shaft_end_y = y1 - uy * head_len
-        px, py = -uy, ux
-        glBegin(GL_LINES)
-        glVertex2f(x0, y0)
-        glVertex2f(shaft_end_x, shaft_end_y)
-        glEnd()
-        glBegin(GL_TRIANGLES)
-        glVertex2f(x1, y1)
-        glVertex2f(shaft_end_x + px * head_half, shaft_end_y + py * head_half)
-        glVertex2f(shaft_end_x - px * head_half, shaft_end_y - py * head_half)
-        glEnd()
-
-    def _raw_to_render_norm(self, pts: np.ndarray) -> np.ndarray:
-        """Carto raw mesh coordinates → same normalized frame as ``_verts_flat``."""
-        p = np.asarray(pts, dtype=np.float64).reshape(-1, 3)
-        if not self._mesh_loaded or p.size == 0:
-            return p
-        c = np.asarray(self._mesh_center, dtype=np.float64).reshape(1, 3)
-        r = max(float(self._mesh_radius), 1e-9)
-        return (p - c) / r
-
-    def _draw_patch_vector_overlay(self, w: int, h: int) -> None:
-        """Screen-space arrows drawn last (always on top of mesh + HUD)."""
-        if not self._patch_preview_active:
-            return
-        bases = self._patch_vector_bases
-        dirs = self._patch_vector_dirs
-        mags = self._patch_vector_mags
-        if bases is None or dirs is None or mags is None:
-            return
-
-        glMatrixMode(GL_PROJECTION)
-        glPushMatrix()
-        glMatrixMode(GL_MODELVIEW)
-        glPushMatrix()
-        self._setup_camera(w, h)
-
-        mag_max = max(float(self._patch_vector_mag_max), 1e-12)
-        segments: list[tuple[float, float, float, float]] = []
-        min_px = 22.0
-        max_px = 0.42 * float(min(w, h))
-        bases = np.asarray(bases, dtype=np.float64).reshape(-1, 3)
-        dirs = np.asarray(dirs, dtype=np.float64).reshape(-1, 3)
-        mags = np.asarray(mags, dtype=np.float64).reshape(-1)
-
-        for i in range(bases.shape[0]):
-            mag = float(mags[i])
-            if not np.isfinite(mag):
-                continue
-            b_raw = bases[i]
-            d = dirs[i]
-            dn = float(np.linalg.norm(d))
-            if dn < 1e-12 or not np.all(np.isfinite(b_raw)) or not np.all(np.isfinite(d)):
-                continue
-            d = d / dn
-            mag_abs = abs(mag)
-
-            b_n = self._raw_to_render_norm(b_raw.reshape(1, 3))[0]
-            # Screen direction from a short step along the 3D direction (normalized frame).
-            step = 0.04 * max(float(self._patch_vector_scale), 0.01)
-            tip_n = self._raw_to_render_norm((b_raw + d * step).reshape(1, 3))[0]
-            p0 = self._project_norm_to_window(float(b_n[0]), float(b_n[1]), float(b_n[2]), w, h)
-            p1dir = self._project_norm_to_window(float(tip_n[0]), float(tip_n[1]), float(tip_n[2]), w, h)
-            if p0 is None:
-                continue
-            x0, y0 = p0
-            if p1dir is None:
-                ux, uy = 1.0, 0.0
-            else:
-                dx, dy = p1dir[0] - x0, p1dir[1] - y0
-                ln = float(math.hypot(dx, dy))
-                if ln < 1e-6:
-                    ux, uy = 1.0, 0.0
-                else:
-                    ux, uy = dx / ln, dy / ln
-
-            frac = mag_abs / mag_max if mag_max > 0 else 1.0
-            seg_len = min_px + (max_px - min_px) * min(1.0, frac)
-            x1 = x0 + ux * seg_len
-            y1 = y0 + uy * seg_len
-            segments.append((x0, y0, x1, y1))
-
-        glMatrixMode(GL_MODELVIEW)
-        glPopMatrix()
-        glMatrixMode(GL_PROJECTION)
-        glPopMatrix()
-        glMatrixMode(GL_MODELVIEW)
-
-        if not segments:
-            return
-
-        self._enter_ortho(w, h)
-        glDisable(GL_DEPTH_TEST)
-        glDisable(GL_LIGHTING)
-        glDisable(GL_TEXTURE_1D)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        for x0, y0, x1, y1 in segments:
-            glLineWidth(4.0)
-            glColor4f(1.0, 1.0, 1.0, 1.0)
-            self._draw_screen_arrow_2d(x0, y0, x1, y1, head_len=12.0, head_half=7.0)
-        glLineWidth(1.0)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-        glEnable(GL_DEPTH_TEST)
-        self._leave_ortho()
 
     def _render_pick_scene(self, w: int, h: int) -> None:
         glClearColor(0.0, 0.0, 0.0, 1.0)  # id=0 = empty
@@ -2515,29 +2065,6 @@ class CartoMeshViewer(OpenGLFrame):
                 glPopMatrix()
             glDisableClientState(GL_VERTEX_ARRAY)
 
-        # Patch anchor pick targets (small spheres, not shown in color pass).
-        if self._patch_preview_active:
-            patch_pos = self._patch_anchor_positions_norm()
-            if patch_pos.shape[0] > 0:
-                n_sph, n_tris, _ = self._pick_pool_sizes()
-                prad = max(0.008, self._current_sphere_radius() * 0.85)
-                base_v = (_SPH_V.astype(np.float32) * prad)
-                base_v_flat = np.ascontiguousarray(base_v).reshape(-1)
-                base_t = _SPH_T.astype(np.uint32).reshape(-1)
-                glEnableClientState(GL_VERTEX_ARRAY)
-                glVertexPointer(3, GL_FLOAT, 0, base_v_flat)
-                for i, pos in enumerate(patch_pos):
-                    pick_id = n_sph + n_tris + 1 + int(i)
-                    r = pick_id & 0xFF
-                    g = (pick_id >> 8) & 0xFF
-                    b = (pick_id >> 16) & 0xFF
-                    glColor3ub(int(r), int(g), int(b))
-                    glPushMatrix()
-                    glTranslatef(float(pos[0]), float(pos[1]), float(pos[2]))
-                    glDrawElements(GL_TRIANGLES, int(base_t.size), GL_UNSIGNED_INT, base_t)
-                    glPopMatrix()
-                glDisableClientState(GL_VERTEX_ARRAY)
-
         # Flush (not finish): ``glFinish`` stalls the CPU until the GPU drains
         # the whole queue — too heavy for a hover pick that runs ~30–60 Hz.
         glFlush()
@@ -2545,16 +2072,11 @@ class CartoMeshViewer(OpenGLFrame):
     def _update_hover_from_pick_id(self, pick_id: int) -> None:
         kind, local = self._decode_pick_id(int(pick_id))
         self._hover_kind = kind
-        self._hover_patch_anchor = None
         if kind == "sphere":
             self._hover_global_idx = (
                 self._elec_global_idx[local] if 0 <= local < len(self._elec_global_idx) else None
             )
             self._hover_triangle = None
-        elif kind == "patch_anchor":
-            self._hover_global_idx = None
-            self._hover_triangle = None
-            self._hover_patch_anchor = int(local) if local >= 0 else None
         elif kind == "triangle":
             self._hover_global_idx = None
             self._hover_triangle = local
@@ -2580,13 +2102,6 @@ class CartoMeshViewer(OpenGLFrame):
                 pass
             txt = f"electrode  {label}  (row #{self._hover_global_idx})"
             color = (255, 240, 120, 255)
-        elif kind == "patch_anchor" and self._hover_patch_anchor is not None:
-            ai = int(self._hover_patch_anchor)
-            label = ""
-            if 0 <= ai < len(self._patch_anchor_labels):
-                label = str(self._patch_anchor_labels[ai])
-            txt = f"patch point  {label}  (#{ai})"
-            color = (180, 255, 200, 255)
         elif kind == "triangle" and self._hover_triangle is not None:
             txt = f"{self.mesh_name}  triangle #{self._hover_triangle}"
             color = (200, 235, 255, 255)
@@ -2709,20 +2224,6 @@ class CartoMeshViewer(OpenGLFrame):
         # a fresh pick pass and reset _hover_global_idx to None mid-call.
         kind = self._hover_kind
         gidx = self._hover_global_idx
-        patch_ai = self._hover_patch_anchor
-        if kind == "patch_anchor" and patch_ai is not None:
-            ai = int(patch_ai)
-            self._selected_patch_anchor = ai
-            cb = self.on_pick_callback
-            if callable(cb):
-                label = ""
-                if 0 <= ai < len(self._patch_anchor_labels):
-                    label = str(self._patch_anchor_labels[ai])
-                try:
-                    cb("patch_anchor", ai, {"label": label})
-                except Exception:
-                    traceback.print_exc()
-            return
         if kind != "sphere" or gidx is None:
             return
         gidx = int(gidx)
@@ -2988,8 +2489,6 @@ class CartoMeshViewer(OpenGLFrame):
             self._request_redraw()
 
     def set_scalar_field(self, field: str) -> None:
-        if self._patch_preview_active:
-            return
         if field == self.scalar_field:
             return
         if str(field).startswith("delta:"):
@@ -3045,10 +2544,14 @@ class CartoMeshViewer(OpenGLFrame):
             self.n_bins = int(max(1, min(256, n_bins)))
         if auto_range is not None:
             self.auto_range = bool(auto_range)
-        if vmin is not None:
-            self.vmin = float(vmin)
-        if vmax is not None:
-            self.vmax = float(vmax)
+            if self.auto_range:
+                self.vmin = None
+                self.vmax = None
+        if not self.auto_range:
+            if vmin is not None:
+                self.vmin = float(vmin)
+            if vmax is not None:
+                self.vmax = float(vmax)
         if color_mode in ("standard", "custom"):
             self.color_mode = color_mode
         if piece_knots is not None:

@@ -1,7 +1,7 @@
-"""Mediators bridge the main ``App`` to feature packages (table, plots, 3D viewer, ...)."""
+"""Mediators bridge the main App to feature packages (table, plots, 3D viewer)."""
+from .app_glue import AppLayoutGlue, MeshAppGlue, TableAppGlue
 
-from .mesh_mediator import MeshAppGlue
-from .table_mediator import TableAppGlue
-from .work_queue import LatestWinsWorker
+# Backward-compatible alias
+ContentLayoutGlue = AppLayoutGlue
 
-__all__ = ["TableAppGlue", "MeshAppGlue", "LatestWinsWorker"]
+__all__ = ["TableAppGlue", "MeshAppGlue", "AppLayoutGlue", "ContentLayoutGlue"]
